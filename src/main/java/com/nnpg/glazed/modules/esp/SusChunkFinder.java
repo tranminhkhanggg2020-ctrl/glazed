@@ -158,25 +158,33 @@ public class SusChunkFinder extends Module {
         scanChunk(worldChunk, pos);
     }
 
-    @EventHandler
+@EventHandler
     private void onRender3D(Render3DEvent event) {
         if (suspiciousChunks.isEmpty() || mc.player == null) return;
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
+
+        // Lấy vị trí camera của người chơi để tính toán tịnh tiến
+        net.minecraft.client.render.Camera camera = mc.gameRenderer.getCamera();
+        double camX = camera.getPos().x;
+        double camY = camera.getPos().y;
+        double camZ = camera.getPos().z;
+
         double planeY = Math.floor(mc.player.getY());
 
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
 
-            double x1 = cp.getStartX();
-            double z1 = cp.getStartZ();
-            double x2 = cp.getStartX() + 16.0;
-            double z2 = cp.getStartZ() + 16.0;
+            // Lấy tọa độ gốc của Chunk và trừ đi tọa độ Camera để ghim cố định xuống đất
+            double x1 = cp.getStartX() - camX;
+            double z1 = cp.getStartZ() - camZ;
+            double x2 = (cp.getStartX() + 16.0) - camX;
+            double z2 = (cp.getStartZ() + 16.0) - camZ;
 
             event.renderer.box(
-                x1, planeY, z1,
-                x2, planeY + 0.05, z2,
+                x1, planeY - camY, z1,
+                x2, (planeY + 0.05) - camY, z2,
                 renderColor,
                 renderColor,
                 ShapeMode.Sides,
