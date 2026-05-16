@@ -1,5 +1,6 @@
 package com.nnpg.glazed.modules.esp;
 
+import net.minecraft.world.Heightmap;
 import com.nnpg.glazed.GlazedAddon;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
@@ -109,22 +110,46 @@ public class SusChunkFinder extends Module {
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (suspiciousChunks.isEmpty() || mc.player == null) return;
+        if (suspiciousChunks.isEmpty() || mc.player == null || mc.world == null) return;
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
 
-        // Sử dụng ma trận hệ thống của Meteor để tự động xử lý góc nhìn Camera tuyệt đối
+        // 1. Lấy vị trí Camera để tính toán toạ độ tương đối (ghim đứng yên)
+        net.minecraft.client.render.Camera camera = mc.gameRenderer.getCamera();
+        double camX = camera.getPos().x;
+        double camY = camera.getPos().y;
+        double camZ = camera.getPos().z;
+
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
 
-            double x1 = cp.getStartX();
-            double z1 = cp.getStartZ();
+            // 2. Lấy Instance của WorldChunk hiện tại từ thế giới game
+            net.minecraft.world.chunk.Chunk rawChunk = mc.world.getChunk(cp.x, cp.z);
+            if (!(rawChunk instanceof WorldChunk chunk)) continue; // Bỏ qua nếu chunk chưa load xong
+
+            // 3. Sử dụng Heightmap để tìm cao độ mặt đất thực tế của Chunk đó
+            // Type.WORLD_SURFACE lấy khối cao nhất không phải không khí (ground)
+            int surfaceY = chunk.getHeight(Heightmap.Type.WORLD_SURFACE, 0, 0);
+
+            // 4. Tính toán toạ độ render tương đối so với Camera (để ghim cố định)
+            double x1 = cp.getStartX() - camX;
+            double z1 = cp.getStartZ() - camZ;
             double x2 = x1 + 16.0;
             double z2 = z1 + 16.0;
-            double y1 = Math.floor(mc.player.getY());
+            
+            // Cao độ cố định trên mặt đất so với mắt người chơi
+            double yPlane = surfaceY - camY; 
 
-            event.renderer.box(x1, y1, z1, x2, y1 + 0.05, z2, renderColor, renderColor, ShapeMode.Sides, 0);
+            // Render mặt phẳng dính chặt xuống đất
+            event.renderer.box(
+                x1, yPlane, z1,
+                x2, yPlane + 0.05, z2, // Độ dày cực mỏng 0.05
+                renderColor,
+                renderColor,
+                ShapeMode.Sides, // Tô màu phẳng các mặt
+                0 // exclusion dir
+            );
         }
     }
 
