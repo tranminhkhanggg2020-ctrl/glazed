@@ -1,4 +1,4 @@
-package com.nnpg.glazed;
+package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.modules.esp.*;
 import com.nnpg.glazed.modules.SusChunkFinder;
