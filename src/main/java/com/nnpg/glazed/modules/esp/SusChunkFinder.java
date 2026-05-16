@@ -115,40 +115,29 @@ public class SusChunkFinder extends Module {
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
 
-        // 1. Lấy vị trí Camera để tính toán toạ độ tương đối (ghim đứng yên)
-        net.minecraft.client.render.Camera camera = mc.gameRenderer.getCamera();
-        double camX = camera.getPos().x;
-        double camY = camera.getPos().y;
-        double camZ = camera.getPos().z;
-
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
 
-            // 2. Lấy Instance của WorldChunk hiện tại từ thế giới game
-            net.minecraft.world.chunk.Chunk rawChunk = mc.world.getChunk(cp.x, cp.z);
-            if (!(rawChunk instanceof WorldChunk chunk)) continue; // Bỏ qua nếu chunk chưa load xong
+            // Lấy toạ độ tuyệt đối đầu góc X và Z của Chunk
+            int blockX = cp.getStartX();
+            int blockZ = cp.getStartZ();
 
-            // 3. Sử dụng Heightmap để tìm cao độ mặt đất thực tế của Chunk đó
-            // Type.WORLD_SURFACE lấy khối cao nhất không phải không khí (ground)
-            int surfaceY = chunk.getHeight(Heightmap.Type.WORLD_SURFACE, 0, 0);
+            // DÙNG MC.WORLD.GETTOPY CHUẨN 100% ĐỂ LẤY ĐỘ CAO MẶT ĐẤT TUYỆT ĐỐI CỐ ĐỊNH
+            int surfaceY = mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, blockX, blockZ);
 
-            // 4. Tính toán toạ độ render tương đối so với Camera (để ghim cố định)
-            double x1 = cp.getStartX() - camX;
-            double z1 = cp.getStartZ() - camZ;
+            // Toạ độ thế giới tuyệt đối giúp ô đỏ đứng im cố định tại vị trí quét
+            double x1 = blockX;
+            double z1 = blockZ;
             double x2 = x1 + 16.0;
             double z2 = z1 + 16.0;
-            
-            // Cao độ cố định trên mặt đất so với mắt người chơi
-            double yPlane = surfaceY - camY; 
 
-            // Render mặt phẳng dính chặt xuống đất
             event.renderer.box(
-                x1, yPlane, z1,
-                x2, yPlane + 0.05, z2, // Độ dày cực mỏng 0.05
+                x1, surfaceY, z1,
+                x2, surfaceY + 0.05, z2,
                 renderColor,
                 renderColor,
-                ShapeMode.Sides, // Tô màu phẳng các mặt
-                0 // exclusion dir
+                ShapeMode.Sides,
+                0
             );
         }
     }
