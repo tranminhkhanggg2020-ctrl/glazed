@@ -10,6 +10,7 @@ import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
@@ -32,7 +33,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> simulationDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("simulation-distance")
-            .description("Chunk radius around the player to scan for suspicious activity.")
+            .description("Bán kính quét chunk xung quanh người chơi.")
             .defaultValue(4)
             .min(1)
             .sliderMax(32)
@@ -42,7 +43,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Minimum sus-block count to flag a chunk as suspicious.")
+            .description("Số lượng khối sus tối thiểu để đánh dấu chunk.")
             .defaultValue(3)
             .min(1)
             .sliderMax(100)
@@ -52,7 +53,7 @@ public class SusChunkFinder extends Module {
     private final Setting<SettingColor> color = sgRender.add(
         new ColorSetting.Builder()
             .name("color")
-            .description("Fill colour for the suspicious-chunk overlay plane.")
+            .description("Màu sắc hiển thị của chunk khả nghi.")
             .defaultValue(new SettingColor(255, 30, 30, 52))
             .build()
     );
@@ -60,78 +61,26 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> alpha = sgRender.add(
         new IntSetting.Builder()
             .name("alpha")
-            .description("Transparency of the rendered plane. 0 = invisible, 255 = fully opaque.")
+            .description("Độ trong suốt của mặt phẳng render.")
             .defaultValue(52)
             .min(0)
             .sliderMax(255)
             .build()
     );
 
-    private final Setting<Boolean> detectKelp = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("kelp")
-            .description("Detect Kelp and Kelp Plant blocks.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Boolean> detectCaveVines = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("cave-vines")
-            .description("Detect Cave Vines and Cave Vines Plant blocks.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Boolean> detectVines = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("vines")
-            .description("Detect Vine blocks.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Boolean> detectAmethyst = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("amethyst")
-            .description("Detect Amethyst Cluster, Small Bud, Medium Bud, and Large Bud blocks.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Boolean> detectBamboo = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("bamboo")
-            .description("Detect Bamboo blocks.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Boolean> detectBeeNest = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("bee-nest")
-            .description("Detect Bee Nest and Beehive blocks.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(
-        new BoolSetting.Builder()
-            .name("rotated-deepslate")
-            .description("Detect Deepslate blocks with AXIS ≠ Y.")
-            .defaultValue(true)
-            .build()
-    );
+    private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").defaultValue(true).build());
+    private final Setting<Boolean> detectCaveVines = sgDetect.add(new BoolSetting.Builder().name("cave-vines").defaultValue(true).build());
+    private final Setting<Boolean> detectVines = sgDetect.add(new BoolSetting.Builder().name("vines").defaultValue(true).build());
+    private final Setting<Boolean> detectAmethyst = sgDetect.add(new BoolSetting.Builder().name("amethyst").defaultValue(true).build());
+    private final Setting<Boolean> detectBamboo = sgDetect.add(new BoolSetting.Builder().name("bamboo").defaultValue(true).build());
+    private final Setting<Boolean> detectBeeNest = sgDetect.add(new BoolSetting.Builder().name("bee-nest").defaultValue(true).build());
+    private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(true).build());
 
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
     private final Color renderColor = new Color();
 
     public SusChunkFinder() {
-        super(
-            GlazedAddon.CATEGORY,
-            "sus-chunk-finder",
-            "Flags loaded chunks containing growth/accumulation blocks that suggest a hidden base."
-        );
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Dự đoán vị trí căn cứ ngầm dựa trên sự tăng trưởng khối.");
     }
 
     @Override
@@ -158,41 +107,27 @@ public class SusChunkFinder extends Module {
         scanChunk(worldChunk, pos);
     }
 
-@EventHandler
+    @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (suspiciousChunks.isEmpty() || mc.player == null) return;
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
 
-        net.minecraft.client.render.Camera camera = mc.gameRenderer.getCamera();
-        double camX = camera.getPos().x;
-        double camY = camera.getPos().y;
-        double camZ = camera.getPos().z;
-
-        double planeY = Math.floor(mc.player.getY());
-
+        // Sử dụng ma trận hệ thống của Meteor để tự động xử lý góc nhìn Camera tuyệt đối
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
 
-            double x1 = cp.getStartX() - camX;
-            double z1 = cp.getStartZ() - camZ;
-            double x2 = (cp.getStartX() + 16.0) - camX;
-            double z2 = (cp.getStartZ() + 16.0) - camZ;
+            double x1 = cp.getStartX();
+            double z1 = cp.getStartZ();
+            double x2 = x1 + 16.0;
+            double z2 = z1 + 16.0;
+            double y1 = Math.floor(mc.player.getY());
 
-            double y1 = planeY - camY;
-            double y2 = (planeY + 0.05) - camY;
-
-            event.renderer.box(
-                x1, y1, z1,
-                x2, y2, z2,
-                renderColor,
-                renderColor,
-                ShapeMode.Sides,
-                0
-            );
+            event.renderer.box(x1, y1, z1, x2, y1 + 0.05, z2, renderColor, renderColor, ShapeMode.Sides, 0);
         }
     }
+
     private void scanChunk(WorldChunk chunk, ChunkPos pos) {
         if (chunk == null) return;
 
@@ -212,7 +147,11 @@ public class SusChunkFinder extends Module {
                         if (isSuspicious(state)) {
                             susCount++;
                             if (susCount >= targetSensitivity) {
-                                suspiciousChunks.add(pos);
+                                if (!suspiciousChunks.contains(pos)) {
+                                    suspiciousChunks.add(pos);
+                                    // ── CẢM BIẾN CHAT: Báo hiệu ngay lập tức khi phát hiện ra base ──
+                                    ChatUtils.info("Detected sus chunk at: " + pos.x + ", " + pos.z);
+                                }
                                 return;
                             }
                         }
@@ -220,7 +159,6 @@ public class SusChunkFinder extends Module {
                 }
             }
         }
-        suspiciousChunks.remove(pos);
     }
 
     private boolean isSuspicious(BlockState state) {
