@@ -1,7 +1,6 @@
-package com.nnpg.glazed.modules.esp;
+package com.nnpg.glazed;
 
-import com.nnpg.glazed.modules.esp.*;
-import com.nnpg.glazed.modules.SusChunkFinder;
+import com.nnpg.glazed.modules.esp.SusChunkFinder;
 import com.nnpg.glazed.modules.main.*;
 import com.nnpg.glazed.modules.pvp.*;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
