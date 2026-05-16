@@ -1,7 +1,6 @@
-package com.nnpg.glazed.modules;
+package com.nnpg.glazed.modules.esp;
  
 // ── Glazed addon ──────────────────────────────────────────────────────────────
-import com.nnpg.glazed.Glazed;
  
 // ── Meteor Client — events ────────────────────────────────────────────────────
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
