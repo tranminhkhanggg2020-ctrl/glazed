@@ -164,24 +164,28 @@ public class SusChunkFinder extends Module {
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
+
+        net.minecraft.client.render.Camera camera = mc.gameRenderer.getCamera();
+        double camX = camera.getPos().x;
+        double camY = camera.getPos().y;
+        double camZ = camera.getPos().z;
+
         double planeY = Math.floor(mc.player.getY());
 
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
 
-            // Giữ nguyên gốc tọa độ tuyệt đối từ ảnh màn hình dòng 172-175 của bạn
-            double x1 = cp.getStartX();
-            double z1 = cp.getOriginalZ() == 0 ? cp.getStartX() : cp.getOriginalZ(); 
-            double x2 = cp.getStartX() + 16.0;
-            double z2 = (cp.getOriginalZ() == 0 ? cp.getOriginalZ() : cp.getOriginalZ()) + 16.0; 
-            // Để an toàn với compiler, ta dùng trực tiếp hàm gốc của bạn:
-            double finalX1 = cp.getStartX();
-            double finalZ1 = cp.getOriginalZ() != 0 ? cp.getOriginalZ() : cp.getStartX();
+            double x1 = cp.getStartX() - camX;
+            double z1 = cp.getStartZ() - camZ;
+            double x2 = (cp.getStartX() + 16.0) - camX;
+            double z2 = (cp.getStartZ() + 16.0) - camZ;
 
-            // Đưa ma trận camera vào để ghim đứng yên tự động không cần trừ camX tay
+            double y1 = planeY - camY;
+            double y2 = (planeY + 0.05) - camY;
+
             event.renderer.box(
-                cp.getStartX(), planeY, cp.getOriginalZ() != 0 ? cp.getOriginalZ() : cp.getStartX(),
-                cp.getStartX() + 16.0, planeY + 0.05, (cp.getOriginalZ() != 0 ? cp.getOriginalZ() : cp.getStartX()) + 16.0,
+                x1, y1, z1,
+                x2, y2, z2,
                 renderColor,
                 renderColor,
                 ShapeMode.Sides,
@@ -189,7 +193,6 @@ public class SusChunkFinder extends Module {
             );
         }
     }
-
     private void scanChunk(WorldChunk chunk, ChunkPos pos) {
         if (chunk == null) return;
 
