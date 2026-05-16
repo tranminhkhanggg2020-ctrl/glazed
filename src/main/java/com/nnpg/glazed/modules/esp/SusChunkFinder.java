@@ -133,7 +133,7 @@ public class SusChunkFinder extends Module {
         SusChunk sus = new SusChunk();
 
         // Duyệt qua tất cả block entities trong chunk
-        for (Map.Entry<BlockPos, BlockEntity> entry : chunk.getBlockEntities().entrySet()) {
+        for (Map.Entry<BlockPos, BlockEntity> entry : ((net.minecraft.world.chunk.WorldChunk) chunk).getBlockEntities().entrySet()) {
             BlockEntity be = entry.getValue();
             if (be == null) continue;
             if (!isStorageBlock(be)) continue;
@@ -161,7 +161,7 @@ public class SusChunkFinder extends Module {
             susChunks.put(pos, sus);
 
             if (isNew && notify.get()) {
-                ChatUtils.sendMsg(title.hashCode(),
+                ChatUtils.sendMsg(title.hashCode(), net.minecraft.util.Formatting.WHITE,
                     String.format("(highlight)[SusChunkFinder](default) Found a stash in chunk (highlight)[%d, %d](default) — (highlight)%d(default) storage blocks.",
                         pos.x, pos.z, sus.count));
             }
