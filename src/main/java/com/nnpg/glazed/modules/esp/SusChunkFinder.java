@@ -1,4 +1,4 @@
-package your.addon.modules; // <- đổi thành package của addon bạn
+package com.nnpg.glazed.modules; // <- đổi thành package của addon bạn
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
