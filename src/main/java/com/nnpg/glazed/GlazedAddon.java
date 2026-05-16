@@ -1,6 +1,7 @@
 package com.nnpg.glazed;
 
 import com.nnpg.glazed.modules.esp.*;
+import com.nnpg.glazed.modules.SusChunkFinder;
 import com.nnpg.glazed.modules.main.*;
 import com.nnpg.glazed.modules.pvp.*;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -61,6 +62,7 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new CollectibleESP());
         Modules.get().add(new SpawnerNotifier());
         Modules.get().add(new VineESP());
+        Modules.get().add(new SusChunkFinder());
         Modules.get().add(new ChunkFinder());
         Modules.get().add(new BlockNotifier());
         Modules.get().add(new SpawnerOrder());
