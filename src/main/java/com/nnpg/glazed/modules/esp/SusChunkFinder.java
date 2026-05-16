@@ -164,27 +164,24 @@ public class SusChunkFinder extends Module {
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
-
-        // Lấy vị trí camera của người chơi để tính toán tịnh tiến
-        net.minecraft.client.render.Camera camera = mc.gameRenderer.getCamera();
-        double camX = camera.getPos().x;
-        double camY = camera.getPos().y;
-        double camZ = camera.getPos().z;
-
         double planeY = Math.floor(mc.player.getY());
 
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
 
-            // Lấy tọa độ gốc của Chunk và trừ đi tọa độ Camera để ghim cố định xuống đất
-            double x1 = cp.getStartX() - camX;
-            double z1 = cp.getStartZ() - camZ;
-            double x2 = (cp.getStartX() + 16.0) - camX;
-            double z2 = (cp.getStartZ() + 16.0) - camZ;
+            // Giữ nguyên gốc tọa độ tuyệt đối từ ảnh màn hình dòng 172-175 của bạn
+            double x1 = cp.getStartX();
+            double z1 = cp.getOriginalZ() == 0 ? cp.getStartX() : cp.getOriginalZ(); 
+            double x2 = cp.getStartX() + 16.0;
+            double z2 = (cp.getOriginalZ() == 0 ? cp.getOriginalZ() : cp.getOriginalZ()) + 16.0; 
+            // Để an toàn với compiler, ta dùng trực tiếp hàm gốc của bạn:
+            double finalX1 = cp.getStartX();
+            double finalZ1 = cp.getOriginalZ() != 0 ? cp.getOriginalZ() : cp.getStartX();
 
+            // Đưa ma trận camera vào để ghim đứng yên tự động không cần trừ camX tay
             event.renderer.box(
-                x1, planeY - camY, z1,
-                x2, (planeY + 0.05) - camY, z2,
+                cp.getStartX(), planeY, cp.getOriginalZ() != 0 ? cp.getOriginalZ() : cp.getStartX(),
+                cp.getStartX() + 16.0, planeY + 0.05, (cp.getOriginalZ() != 0 ? cp.getOriginalZ() : cp.getStartX()) + 16.0,
                 renderColor,
                 renderColor,
                 ShapeMode.Sides,
