@@ -1,6 +1,6 @@
 package com.nnpg.glazed;
 
-import com.nnpg.glazed.modules.esp.SusChunkFinder;
+import com.nnpg.glazed.modules.esp.*;
 import com.nnpg.glazed.modules.main.*;
 import com.nnpg.glazed.modules.pvp.*;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -126,4 +126,3 @@ public class GlazedAddon extends MeteorAddon {
         return "com.nnpg.glazed";
     }
 }
-
