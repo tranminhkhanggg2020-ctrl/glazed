@@ -1,7 +1,7 @@
 package com.nnpg.glazed.modules.esp;
  
 // ── Glazed addon ──────────────────────────────────────────────────────────────
- 
+import com.nnpg.glazed.GlazedAddon;
 // ── Meteor Client — events ────────────────────────────────────────────────────
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
@@ -238,7 +238,7 @@ public class SusChunkFinder extends Module {
  
     public SusChunkFinder() {
         super(
-            Glazed.CATEGORY,
+            GlazedAddon.CATEGORY,
             "sus-chunk-finder",
             "Flags loaded chunks containing growth/accumulation blocks that suggest a hidden base, farm, or AFK player."
         );
