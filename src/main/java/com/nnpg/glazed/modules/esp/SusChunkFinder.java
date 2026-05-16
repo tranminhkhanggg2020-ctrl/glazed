@@ -291,7 +291,7 @@ public class SusChunkFinder extends Module {
  
         // The client world only ever holds WorldChunk instances.
         // The cast is safe; the instanceof guard is defensive for API changes.
-        if (!(event.chunk instanceof WorldChunk worldChunk)) return;
+        if (!(event.chunk() instanceof WorldChunk worldChunk)) return;
  
         ChunkPos pos = worldChunk.getPos();
  
