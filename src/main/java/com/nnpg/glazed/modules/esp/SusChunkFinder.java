@@ -1,9 +1,8 @@
 package com.nnpg.glazed.modules.esp;
 
-import net.minecraft.world.Heightmap;
 import com.nnpg.glazed.GlazedAddon;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
@@ -17,12 +16,15 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.chunk.ChunkSection;
-import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.world.Heightmap;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -34,7 +36,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> simulationDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("simulation-distance")
-            .description("Bán kính quét chunk xung quanh người chơi.")
+            .description("Bán kính hiển thị vùng đỏ xung quanh người chơi.")
             .defaultValue(4)
             .min(1)
             .sliderMax(32)
@@ -44,17 +46,17 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Số lượng khối sus tối thiểu để đánh dấu chunk.")
+            .description("Số lượng khối mọc lên/đặt xuống thời gian thực tối thiểu để đánh dấu.")
             .defaultValue(3)
             .min(1)
-            .sliderMax(100)
+            .sliderMax(20)
             .build()
     );
 
     private final Setting<SettingColor> color = sgRender.add(
         new ColorSetting.Builder()
             .name("color")
-            .description("Màu sắc hiển thị của chunk khả nghi.")
+            .description("Màu sắc của mặt phẳng đánh dấu.")
             .defaultValue(new SettingColor(255, 30, 30, 52))
             .build()
     );
@@ -62,7 +64,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> alpha = sgRender.add(
         new IntSetting.Builder()
             .name("alpha")
-            .description("Độ trong suốt của mặt phẳng render.")
+            .description("Độ trong suốt của mặt phẳng.")
             .defaultValue(52)
             .min(0)
             .sliderMax(255)
@@ -72,40 +74,65 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").defaultValue(true).build());
     private final Setting<Boolean> detectCaveVines = sgDetect.add(new BoolSetting.Builder().name("cave-vines").defaultValue(true).build());
     private final Setting<Boolean> detectVines = sgDetect.add(new BoolSetting.Builder().name("vines").defaultValue(true).build());
-    private final Setting<Boolean> detectAmethyst = sgDetect.add(new BoolSetting.Builder().name("amethyst").defaultValue(true).build());
     private final Setting<Boolean> detectBamboo = sgDetect.add(new BoolSetting.Builder().name("bamboo").defaultValue(true).build());
     private final Setting<Boolean> detectBeeNest = sgDetect.add(new BoolSetting.Builder().name("bee-nest").defaultValue(true).build());
     private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(true).build());
 
+    // Set chứa danh sách chunk đã xác nhận có hoạt động sinh hoạt/mọc cây thực tế
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
+    
+    // Bản đồ đếm số lượng khối thay đổi thời gian thực cho từng chunk
+    private final Map<ChunkPos, Integer> realTimeGrowthCount = new ConcurrentHashMap<>();
     private final Color renderColor = new Color();
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Dự đoán vị trí căn cứ ngầm dựa trên sự tăng trưởng khối.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Phát hiện hoạt động sinh hoạt, tăng trưởng khối thời gian thực.");
     }
 
     @Override
     public void onActivate() {
         suspiciousChunks.clear();
-        if (mc.world != null && mc.player != null) {
-            fullRescan();
-        }
+        realTimeGrowthCount.clear();
     }
 
     @Override
     public void onDeactivate() {
         suspiciousChunks.clear();
+        realTimeGrowthCount.clear();
     }
 
+    // ── ĐÓN ĐẦU BIẾN CỐ THỜI GIAN THỰC QUA GÓI TIN MẠNG (TẬP TRUNG CHÍNH XÁC 100%) ──
     @EventHandler
-    private void onChunkData(ChunkDataEvent event) {
-        if (mc.player == null) return;
-        if (!(event.chunk() instanceof WorldChunk worldChunk)) return;
+    private void onPacketReceive(PacketEvent.Receive event) {
+        if (mc.world == null || mc.player == null) return;
 
-        ChunkPos pos = worldChunk.getPos();
-        if (!isInRange(pos)) return;
+        // Trường hợp 1: Server cập nhật 1 khối đơn lẻ (Cây mọc thêm 1 đốt hoặc người đặt khối)
+        if (event.packet instanceof BlockUpdateS2CPacket packet) {
+            checkAndTrackGrowth(packet.getPos(), packet.getState());
+        } 
+        // Trường hợp 2: Server cập nhật nhiều khối trong 1 vùng (Chuỗi farm tự động chạy hoặc piston đẩy liên tục)
+        else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
+            packet.visitUpdates(this::checkAndTrackGrowth);
+        }
+    }
 
-        scanChunk(worldChunk, pos);
+    private void checkAndTrackGrowth(BlockPos pos, BlockState state) {
+        if (isSuspicious(state)) {
+            ChunkPos cp = new ChunkPos(pos);
+
+            // Nếu chunk này đã đạt ngưỡng và bị đánh dấu đỏ rồi thì không cần đếm tiếp nữa
+            if (suspiciousChunks.contains(cp)) return;
+
+            // Cộng dồn số khối mọc thực tế trong phiên chơi hiện tại
+            int currentCount = realTimeGrowthCount.getOrDefault(cp, 0) + 1;
+            realTimeGrowthCount.put(cp, currentCount);
+
+            // Khi số lượng biến động mọc thực tế đạt hoặc vượt ngưỡng cấu hình Sensitivity
+            if (currentCount >= sensitivity.get()) {
+                suspiciousChunks.add(cp);
+                ChatUtils.info("Detected ACTIVE growth/placement at chunk: " + cp.x + ", " + cp.z);
+            }
+        }
     }
 
     @EventHandler
@@ -119,59 +146,23 @@ public class SusChunkFinder extends Module {
             if (!isInRange(cp)) continue;
 
             // Lấy toạ độ tuyệt đối đầu góc X và Z của Chunk
-            int blockX = cp.getStartX();
-            int blockZ = cp.getStartZ();
-
-            // DÙNG MC.WORLD.GETTOPY CHUẨN 100% ĐỂ LẤY ĐỘ CAO MẶT ĐẤT TUYỆT ĐỐI CỐ ĐỊNH
-            int surfaceY = mc.world.getTopY(net.minecraft.world.Heightmap.Type.WORLD_SURFACE, blockX, blockZ);
-
-            // Toạ độ thế giới tuyệt đối giúp ô đỏ đứng im cố định tại vị trí quét
-            double x1 = blockX;
-            double z1 = blockZ;
+            double x1 = cp.getStartX();
+            double z1 = cp.getStartZ();
             double x2 = x1 + 16.0;
             double z2 = z1 + 16.0;
 
+            // Ghim CHẾT toạ độ Y ở mức 50 theo đúng ý bạn
+            double fixedY = 50.0;
+
+            // Render ô vuông đỏ phẳng lì tại đúng Y=50
             event.renderer.box(
-                x1, surfaceY, z1,
-                x2, surfaceY + 0.05, z2,
+                x1, fixedY, z1,
+                x2, fixedY + 0.05, z2,
                 renderColor,
                 renderColor,
                 ShapeMode.Sides,
                 0
             );
-        }
-    }
-
-    private void scanChunk(WorldChunk chunk, ChunkPos pos) {
-        if (chunk == null) return;
-
-        int susCount = 0;
-        int targetSensitivity = sensitivity.get();
-        ChunkSection[] sections = chunk.getSectionArray();
-
-        for (int sIdx = 0; sIdx < sections.length; sIdx++) {
-            ChunkSection section = sections[sIdx];
-            if (section == null || section.isEmpty()) continue;
-
-            for (int lx = 0; lx < 16; lx++) {
-                for (int ly = 0; ly < 16; ly++) {
-                    for (int lz = 0; lz < 16; lz++) {
-                        BlockState state = section.getBlockState(lx, ly, lz);
-
-                        if (isSuspicious(state)) {
-                            susCount++;
-                            if (susCount >= targetSensitivity) {
-                                if (!suspiciousChunks.contains(pos)) {
-                                    suspiciousChunks.add(pos);
-                                    // ── CẢM BIẾN CHAT: Báo hiệu ngay lập tức khi phát hiện ra base ──
-                                    ChatUtils.info("Detected sus chunk at: " + pos.x + ", " + pos.z);
-                                }
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -182,7 +173,6 @@ public class SusChunkFinder extends Module {
         if (detectKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) return true;
         if (detectCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) return true;
         if (detectVines.get() && block == Blocks.VINE) return true;
-        if (detectAmethyst.get() && (block == Blocks.AMETHYST_CLUSTER || block == Blocks.SMALL_AMETHYST_BUD || block == Blocks.MEDIUM_AMETHYST_BUD || block == Blocks.LARGE_AMETHYST_BUD)) return true;
         if (detectBamboo.get() && block == Blocks.BAMBOO) return true;
         if (detectBeeNest.get() && (block == Blocks.BEE_NEST || block == Blocks.BEEHIVE)) return true;
         if (detectRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS) && state.get(Properties.AXIS) != Direction.Axis.Y) return true;
@@ -195,22 +185,5 @@ public class SusChunkFinder extends Module {
         ChunkPos playerChunk = mc.player.getChunkPos();
         int dist = simulationDistance.get();
         return Math.abs(pos.x - playerChunk.x) <= dist && Math.abs(pos.z - playerChunk.z) <= dist;
-    }
-
-    private void fullRescan() {
-        if (mc.world == null || mc.player == null) return;
-        suspiciousChunks.clear();
-        ChunkPos playerChunk = mc.player.getChunkPos();
-        int dist = simulationDistance.get();
-
-        for (int dx = -dist; dx <= dist; dx++) {
-            for (int dz = -dist; dz <= dist; dz++) {
-                ChunkPos cp = new ChunkPos(playerChunk.x + dx, playerChunk.z + dz);
-                net.minecraft.world.chunk.Chunk raw = mc.world.getChunk(cp.x, cp.z);
-                if (raw instanceof WorldChunk wc) {
-                    scanChunk(wc, cp);
-                }
-            }
-        }
     }
 }
