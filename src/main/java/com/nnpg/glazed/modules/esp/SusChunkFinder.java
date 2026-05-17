@@ -6,7 +6,6 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
@@ -21,39 +20,58 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
+import net.minecraft.nbt.NbtCompound;
+import net.minecraft.nbt.NbtElement;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
-import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
-import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
-import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.network.packet.s2c.play.*;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.sound.SoundEvent;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 
 public class SusChunkFinder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgDetect  = settings.createGroup("Detection");
     private final SettingGroup sgRender  = settings.createGroup("Render");
 
-    private final Setting<Integer> simulationDistance = sgGeneral.add(new IntSetting.Builder().name("simulation-distance").defaultValue(4).min(1).sliderMax(32).build());
-    private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder().name("sensitivity").defaultValue(3).min(1).sliderMax(20).build());
+    private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder().name("sensitivity").description("Điểm báo động tổng hợp").defaultValue(50).min(10).sliderMax(200).build());
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder().name("color").defaultValue(new SettingColor(255, 30, 30, 50)).build());
-    private final Setting<Integer> alpha = sgRender.add(new IntSetting.Builder().name("alpha").defaultValue(50).min(0).sliderMax(255).build());
 
-    private final Setting<Boolean> detectBamboo = sgDetect.add(new BoolSetting.Builder().name("bamboo").defaultValue(true).build());
-    private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").defaultValue(true).build());
-    private final Setting<Boolean> detectAmethyst = sgDetect.add(new BoolSetting.Builder().name("amethyst").defaultValue(true).build());
-    private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(true).build());
-
-    // ── DEEP RESEARCH #2: STEALTH MEMORY MANAGER (ZERO-ALLOCATION) ──
+    // ── BIẾN LƯU TRỮ CHUNG ──
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
-    private final Long2ObjectMap<ChunkData> chunkDataMap = Long2ObjectMaps.synchronize(new Long2ObjectOpenHashMap<>(2048));
     private final Color renderColor = new Color();
-    private int cleanupTimer = 0;
-    private static final long DECAY_TIME_MS = 180000;
+    private final BlockPos.Mutable visibleAnchor = new BlockPos.Mutable();
+
+    // ── KIẾN TRÚC LMAX DISRUPTOR (ZERO-ALLOC OFF-LOADER) ──
+    private static final int BUFFER_SIZE = 8192;
+    private static final int INDEX_MASK = BUFFER_SIZE - 1;
+
+    static class PaddedSequence extends AtomicLong { public volatile long p1, p2, p3, p4, p5, p6, p7; }
+    
+    private final PaddedSequence writeSequence = new PaddedSequence();
+    private final PaddedSequence readSequence = new PaddedSequence();
+    private final EventPayload[] ringBuffer = new EventPayload[BUFFER_SIZE];
+    private Thread workerThread;
+
+    // Dữ liệu nội bộ xử lý logic Welford & Threat Scoring
+    private final Long2ObjectMap<ChunkData> chunkDataMap = Long2ObjectMaps.synchronize(new Long2ObjectOpenHashMap<>(2048));
+
+    private static class EventPayload {
+        long chunkKey;
+        double addedThreat;
+        boolean isBlockUpdate;
+    }
 
     private static class StatisticalTickAnalyzer {
         private double mean = 0.0;
@@ -77,167 +95,211 @@ public class SusChunkFinder extends Module {
     }
 
     private static class ChunkData {
-        int score = 0;
+        double totalThreat = 0;
         long lastUpdateTime = System.currentTimeMillis();
-        int updatesInLast10Sec = 0;
-        long firstUpdateInWindow = 0;
-        final StatisticalTickAnalyzer analyzer = new StatisticalTickAnalyzer(); 
+        final StatisticalTickAnalyzer analyzer = new StatisticalTickAnalyzer();
     }
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Deep Research: Welford + EntityLeak + GhostSonar + ZeroAlloc");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Dự án Radar Toàn tri: Âm thanh + Đọc trộm NBT + LMAX Offloader");
+        for (int i = 0; i < BUFFER_SIZE; i++) ringBuffer[i] = new EventPayload();
     }
 
     @Override
     public void onActivate() {
         suspiciousChunks.clear();
         chunkDataMap.clear();
-        cleanupTimer = 0;
+        writeSequence.set(0);
+        readSequence.set(0);
+        
+        workerThread = new Thread(() -> {
+            while (!Thread.interrupted()) {
+                long currentRead = readSequence.get();
+                while (currentRead >= writeSequence.get()) {
+                    LockSupport.parkNanos(1000);
+                }
+
+                EventPayload event = ringBuffer[(int) (currentRead & INDEX_MASK)];
+                processThreatAsync(event.chunkKey, event.addedThreat, event.isBlockUpdate);
+                readSequence.lazySet(currentRead + 1);
+            }
+        });
+        workerThread.setName("SusChunkFinder-Analytics-Worker");
+        workerThread.setDaemon(true);
+        workerThread.setPriority(Thread.MIN_PRIORITY);
+        workerThread.start();
     }
 
     @Override
     public void onDeactivate() {
+        if (workerThread != null) workerThread.interrupt();
         suspiciousChunks.clear();
         chunkDataMap.clear();
     }
 
-    @EventHandler
-    private void onTick(TickEvent.Post event) {
-        if (!isActive() || chunkDataMap.isEmpty()) return;
-        cleanupTimer++;
-        if (cleanupTimer >= 1200) {
-            cleanupTimer = 0;
-            long currentTime = System.currentTimeMillis();
-            chunkDataMap.long2ObjectEntrySet().removeIf(entry -> currentTime - entry.getValue().lastUpdateTime > DECAY_TIME_MS * 2);
+    // Luồng Worker Asynchronous xử lý logic Welford (Zero-Lag)
+    private void processThreatAsync(long chunkKey, double addedThreat, boolean isBlockUpdate) {
+        long currentTime = System.currentTimeMillis();
+        ChunkData data = chunkDataMap.get(chunkKey);
+        
+        if (data == null) {
+            data = new ChunkData();
+            chunkDataMap.put(chunkKey, data);
+        }
+
+        if (currentTime - data.lastUpdateTime > 180000) {
+            data.totalThreat = 0; // Reset sau 3 phút
+        }
+
+        data.totalThreat += addedThreat;
+        data.lastUpdateTime = currentTime;
+
+        if (isBlockUpdate) {
+            data.analyzer.recordEvent(currentTime);
+            if (data.analyzer.isArtificialRedstoneClock()) {
+                flagChunk(chunkKey, "Redstone Clock ngầm");
+                return;
+            }
+        }
+
+        if (data.totalThreat >= sensitivity.get()) {
+            flagChunk(chunkKey, "Vượt ngưỡng nguy hiểm (Âm thanh/NBT/Mọc cây)");
         }
     }
 
+    private void flagChunk(long chunkKey, String reason) {
+        int chunkX = (int) chunkKey;
+        int chunkZ = (int) (chunkKey >> 32);
+        ChunkPos cp = new ChunkPos(chunkX, chunkZ);
+        
+        if (!suspiciousChunks.contains(cp)) {
+            suspiciousChunks.add(cp);
+            ChatUtils.info("⚠️ [Radar Toàn Tri] Phát hiện: " + reason + " tại " + chunkX + ", " + chunkZ);
+        }
+    }
+
+    // Gửi dữ liệu từ Netty vào luồng Worker LMAX Disruptor
+    private void dispatchToWorker(long chunkKey, double threat, boolean isBlock) {
+        long currentWrite = writeSequence.get();
+        if (readSequence.get() <= currentWrite - BUFFER_SIZE) return; // Tránh tràn bộ đệm
+        
+        EventPayload event = ringBuffer[(int) (currentWrite & INDEX_MASK)];
+        event.chunkKey = chunkKey;
+        event.addedThreat = threat;
+        event.isBlockUpdate = isBlock;
+        writeSequence.lazySet(currentWrite + 1);
+    }
+
+    // ── HỆ THỐNG LẮNG NGHE GÓI TIN CHÍNH ──
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // Bắt cập nhật khối
+        // 1. Phân tích Khối
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
-            evaluateBlockThreat(packet.getPos(), packet.getState());
+            evaluateBlock(packet.getPos(), packet.getState());
         } 
-        else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
-            packet.visitUpdates(this::evaluateBlockThreat);
-        }
         
-        // ── DEEP RESEARCH #1: ENTITY LEAK SCANNER (Bắt Xe Goòng) ──
+        // 2. Phân tích Xe Goòng tàng hình
         else if (event.packet instanceof EntitySpawnS2CPacket packet) {
             EntityType<?> type = packet.getEntityType();
             if (type == EntityType.CHEST_MINECART || type == EntityType.HOPPER_MINECART || type == EntityType.SPAWNER_MINECART) {
-                ChunkPos cp = new ChunkPos(BlockPos.ofFloored(packet.getX(), packet.getY(), packet.getZ()));
-                if (!suspiciousChunks.contains(cp)) {
-                    suspiciousChunks.add(cp);
-                    ChatUtils.info("⚠️ [SusChunk] BÁO ĐỘNG ĐỎ! Phát hiện Minecart ngầm (Entity Leak) tại: " + cp.x + ", " + cp.z);
+                long key = ChunkPos.toLong((int) packet.getX() >> 4, (int) packet.getZ() >> 4);
+                dispatchToWorker(key, 100.0, false);
+            }
+        }
+        
+        // 3. Phân tích Âm thanh
+        else if (event.packet instanceof PlaySoundS2CPacket packet) {
+            RegistryEntry<SoundEvent> soundEntry = packet.getSound();
+            String soundId = soundEntry.value().getId().getPath();
+            double threat = 0;
+            switch (soundId) {
+                case "block.piston.extend": case "block.piston.contract": threat = 15; break;
+                case "block.chest.open": case "block.chest.close": case "block.barrel.open": threat = 25; break;
+                case "entity.bat.ambient": threat = 5; break;
+            }
+            if (threat > 0) {
+                long key = ChunkPos.toLong((int) packet.getX() >> 4, (int) packet.getZ() >> 4);
+                dispatchToWorker(key, threat, false);
+            }
+        }
+        
+        // 4. Phân tích NBT (Đọc trộm Lò nung/Phễu)
+        else if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
+            NbtCompound nbt = packet.getNbt();
+            if (nbt != null && !nbt.isEmpty()) {
+                double threat = 0;
+                if (nbt.contains("BurnTime", NbtElement.SHORT_TYPE) && nbt.getShort("BurnTime") > 0) threat += 40;
+                if (nbt.contains("Items", NbtElement.LIST_TYPE)) threat += 30;
+                if (nbt.contains("SpawnData", NbtElement.COMPOUND_TYPE)) threat += 50;
+                
+                if (threat > 0) {
+                    long key = ChunkPos.toLong(packet.getPos().getX() >> 4, packet.getPos().getZ() >> 4);
+                    dispatchToWorker(key, threat, false);
                 }
             }
         }
     }
 
-    // ── DEEP RESEARCH #3: GHOST MINER SONAR ──
-    private void pingSuspiciousCoordinate(BlockPos target) {
-        if (mc.getNetworkHandler() != null) {
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, target, Direction.UP));
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, target, Direction.UP));
-        }
-    }
-
-    private void evaluateBlockThreat(BlockPos pos, BlockState state) {
-        int threatScore = 0;
-        boolean isAFKPredictableBlock = false;
+    private void evaluateBlock(BlockPos pos, BlockState state) {
         net.minecraft.block.Block block = state.getBlock();
+        double threat = 0;
+        boolean isRedstoneUpdate = false;
 
-        if (state.isAir()) {
-            threatScore = 1; 
-        } else if (detectBamboo.get() && block == Blocks.BAMBOO) {
-            threatScore = (pos.getY() < 50) ? 20 : 2; 
-            isAFKPredictableBlock = true;
-        } else if (detectKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
-            threatScore = 2;
-            isAFKPredictableBlock = true;
-        } else if (detectAmethyst.get() && (block == Blocks.AMETHYST_CLUSTER || block == Blocks.SMALL_AMETHYST_BUD || block == Blocks.MEDIUM_AMETHYST_BUD || block == Blocks.LARGE_AMETHYST_BUD)) {
-            threatScore = 15;
-            
-            // Kích hoạt Ghost Sonar khi phát hiện Thạch anh để ép Server xác nhận khu vực xung quanh
-            pingSuspiciousCoordinate(pos);
-            
-        } else if (detectRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS) && state.get(Properties.AXIS) != Direction.Axis.Y) {
-            threatScore = 15;
+        if (state.isAir()) threat = 1;
+        else if (block == Blocks.BAMBOO) { threat = pos.getY() < 50 ? 20 : 2; isRedstoneUpdate = true; }
+        else if (block == Blocks.KELP || block == Blocks.KELP_PLANT) { threat = 2; isRedstoneUpdate = true; }
+        else if (block == Blocks.DEEPSLATE && state.contains(Properties.AXIS) && state.get(Properties.AXIS) != Direction.Axis.Y) threat = 15;
+        else if (block == Blocks.AMETHYST_CLUSTER) {
+            threat = 15;
+            executeIndirectSonar(pos); // Kích hoạt Ghost Sonar an toàn
         }
 
-        if (threatScore == 0) return;
-
-        ChunkPos cp = new ChunkPos(pos);
-        if (suspiciousChunks.contains(cp)) return;
-
-        long key = ChunkPos.toLong(cp.x, cp.z);
-        long currentTime = System.currentTimeMillis();
-        
-        ChunkData data = chunkDataMap.get(key);
-        if (data == null) {
-            data = new ChunkData();
-            chunkDataMap.put(key, data);
+        if (threat > 0) {
+            long key = ChunkPos.toLong(pos.getX() >> 4, pos.getZ() >> 4);
+            dispatchToWorker(key, threat, isRedstoneUpdate);
         }
-        
-        // Đo đếm Redstone
-        data.analyzer.recordEvent(currentTime);
-        if (data.analyzer.isArtificialRedstoneClock()) {
-            suspiciousChunks.add(cp);
-            ChatUtils.info("⚠️ [SusChunk] BÁO ĐỘNG ĐỎ! Phát hiện Redstone Clock ngầm tại: " + cp.x + ", " + cp.z);
-            return;
-        }
+    }
 
-        if (currentTime - data.lastUpdateTime > DECAY_TIME_MS) {
-            data.score = 0; 
-            data.updatesInLast10Sec = 0;
-        }
+    // ── GHOST SONAR GIÁN TIẾP CHỐNG GRIM AC ──
+    private void executeIndirectSonar(BlockPos hiddenTarget) {
+        if (mc.player == null) return;
+        Vec3d eyePos = mc.player.getEyePos();
+        boolean found = false;
 
-        data.score += threatScore;
-        data.lastUpdateTime = currentTime;
+        for (int x = -2; x <= 2 && !found; x++) {
+            for (int y = -2; y <= 2 && !found; y++) {
+                for (int z = -2; z <= 2 && !found; z++) {
+                    visibleAnchor.set(hiddenTarget, x, y, z);
+                    if (visibleAnchor.equals(hiddenTarget)) continue;
 
-        if (isAFKPredictableBlock) {
-            if (data.updatesInLast10Sec == 0) { data.firstUpdateInWindow = currentTime; }
-            if (currentTime - data.firstUpdateInWindow < 10000) { data.updatesInLast10Sec++; } 
-            else { data.updatesInLast10Sec = 1; data.firstUpdateInWindow = currentTime; }
-            
-            if (data.updatesInLast10Sec > 5) {
-                if (!suspiciousChunks.contains(cp)) {
-                    suspiciousChunks.add(cp);
-                    ChatUtils.info("⚠️ [SusChunk] Báo động! Phát hiện AFK Farm mọc đồng loạt tại: " + cp.x + ", " + cp.z);
-                    return;
+                    Vec3d targetCenter = Vec3d.ofCenter(visibleAnchor);
+                    RaycastContext ctx = new RaycastContext(eyePos, targetCenter, RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player);
+                    BlockHitResult hit = mc.player.clientWorld.raycast(ctx);
+                    
+                    if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(visibleAnchor)) {
+                        found = true;
+                        float yaw = (float) Math.toDegrees(Math.atan2(targetCenter.z - eyePos.z, targetCenter.x - eyePos.x)) - 90.0F;
+                        float pitch = (float) -Math.toDegrees(Math.atan2(targetCenter.y - eyePos.y, Math.sqrt(Math.pow(targetCenter.x - eyePos.x, 2) + Math.pow(targetCenter.z - eyePos.z, 2))));
+                        
+                        mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround()));
+                        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, visibleAnchor, Direction.UP));
+                        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, visibleAnchor, Direction.UP));
+                    }
                 }
             }
-        }
-
-        if (data.score >= sensitivity.get() * 5) { 
-            suspiciousChunks.add(cp);
-            ChatUtils.info("⚠️ [SusChunk] Báo động hoạt động tại Chunk: " + cp.x + ", " + cp.z);
         }
     }
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (suspiciousChunks.isEmpty() || mc.player == null || mc.world == null) return;
-
+        if (suspiciousChunks.isEmpty() || mc.player == null) return;
         SettingColor sc = color.get();
-        renderColor.set(sc.r, sc.g, sc.b, alpha.get());
+        renderColor.set(sc.r, sc.g, sc.b, sc.a);
 
         for (ChunkPos cp : suspiciousChunks) {
-            if (!isInRange(cp)) continue;
-
-            double x1 = cp.getStartX();
-            double z1 = cp.getStartZ();
-            event.renderer.box(x1, 50.0, z1, x1 + 16.0, 50.05, z1 + 16.0, renderColor, renderColor, ShapeMode.Sides, 0);
+            event.renderer.box(cp.getStartX(), 50.0, cp.getStartZ(), cp.getStartX() + 16.0, 50.05, cp.getStartZ() + 16.0, renderColor, renderColor, ShapeMode.Sides, 0);
         }
-    }
-
-    private boolean isInRange(ChunkPos pos) {
-        if (mc.player == null) return false;
-        ChunkPos playerChunk = mc.player.getChunkPos();
-        int dist = simulationDistance.get();
-        return Math.abs(pos.x - playerChunk.x) <= dist && Math.abs(pos.z - playerChunk.z) <= dist;
     }
 }
