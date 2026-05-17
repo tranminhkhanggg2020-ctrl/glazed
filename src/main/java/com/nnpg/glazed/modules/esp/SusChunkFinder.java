@@ -71,19 +71,28 @@ public class SusChunkFinder extends Module {
             .build()
     );
 
-    private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").defaultValue(true).build());
+    private final Setting<Boolean> detectAmethyst = sgDetect.add(new BoolSetting.Builder().name("amethyst").description("Dò Thạch anh (radar cự ly gần)").defaultValue(true).build());    private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").defaultValue(true).build());
     private final Setting<Boolean> detectCaveVines = sgDetect.add(new BoolSetting.Builder().name("cave-vines").defaultValue(true).build());
     private final Setting<Boolean> detectVines = sgDetect.add(new BoolSetting.Builder().name("vines").defaultValue(true).build());
     private final Setting<Boolean> detectBamboo = sgDetect.add(new BoolSetting.Builder().name("bamboo").defaultValue(true).build());
     private final Setting<Boolean> detectBeeNest = sgDetect.add(new BoolSetting.Builder().name("bee-nest").defaultValue(true).build());
     private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(true).build());
 
-    // Set chứa danh sách chunk đã xác nhận có hoạt động sinh hoạt/mọc cây thực tế
+    // ── BIẾN LƯU TRỮ MỚI ──
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
     
-    // Bản đồ đếm số lượng khối thay đổi thời gian thực cho từng chunk
-    private final Map<ChunkPos, Integer> realTimeGrowthCount = new ConcurrentHashMap<>();
+    // Lưu trữ Dữ liệu Chunk (Điểm số và Thời gian cập nhật cuối cùng)
+    private final Map<ChunkPos, ChunkData> chunkDataMap = new ConcurrentHashMap<>();
     private final Color renderColor = new Color();
+
+    // Lớp dữ liệu nội bộ để xử lý Time-Decay
+    private static class ChunkData {
+        int score = 0;
+        long lastUpdateTime = System.currentTimeMillis();
+    }
+
+    // Thời gian "lãng quên" nếu không có cập nhật mới (Ví dụ: 3 phút = 180,000 ms)
+    private static final long DECAY_TIME_MS = 180000;
 
     public SusChunkFinder() {
         super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Phát hiện hoạt động sinh hoạt, tăng trưởng khối thời gian thực.");
@@ -92,46 +101,70 @@ public class SusChunkFinder extends Module {
     @Override
     public void onActivate() {
         suspiciousChunks.clear();
-        realTimeGrowthCount.clear();
+        chunkDataMap.clear(); // Đã sửa thành biến mới để không bị lỗi
     }
 
     @Override
     public void onDeactivate() {
         suspiciousChunks.clear();
-        realTimeGrowthCount.clear();
+        chunkDataMap.clear(); // Đã sửa thành biến mới để không bị lỗi
     }
 
-    // ── ĐÓN ĐẦU BIẾN CỐ THỜI GIAN THỰC QUA GÓI TIN MẠNG (TẬP TRUNG CHÍNH XÁC 100%) ──
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // Trường hợp 1: Server cập nhật 1 khối đơn lẻ (Cây mọc thêm 1 đốt hoặc người đặt khối)
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
-            checkAndTrackGrowth(packet.getPos(), packet.getState());
-        } 
-        // Trường hợp 2: Server cập nhật nhiều khối trong 1 vùng (Chuỗi farm tự động chạy hoặc piston đẩy liên tục)
-        else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
-            packet.visitUpdates(this::checkAndTrackGrowth);
+            evaluateBlockThreat(packet.getPos(), packet.getState());
+        } else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
+            packet.visitUpdates(this::evaluateBlockThreat);
         }
     }
 
-    private void checkAndTrackGrowth(BlockPos pos, BlockState state) {
-        if (isSuspicious(state)) {
-            ChunkPos cp = new ChunkPos(pos);
+    // ── HỆ THỐNG ĐÁNH GIÁ TRỌNG SỐ & LỌC CAO ĐỘ ──
+    private void evaluateBlockThreat(BlockPos pos, BlockState state) {
+        int threatScore = 0;
+        net.minecraft.block.Block block = state.getBlock();
 
-            // Nếu chunk này đã đạt ngưỡng và bị đánh dấu đỏ rồi thì không cần đếm tiếp nữa
-            if (suspiciousChunks.contains(cp)) return;
+        // 1. Phân loại trọng số nguy hiểm
+        if (state.isAir()) {
+            // Không khí thay đổi -> Có thể ai đó vừa đào khối
+            threatScore = 1; 
+        } else if (detectBamboo.get() && block == Blocks.BAMBOO) {
+            // Tre mọc dưới hang sâu (Y < 50) là 100% farm ngầm!
+            threatScore = (pos.getY() < 50) ? 20 : 2; 
+        } else if (detectKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
+            threatScore = 2;
+        } else if (detectAmethyst.get() && (block == Blocks.AMETHYST_CLUSTER || block == Blocks.SMALL_AMETHYST_BUD || block == Blocks.MEDIUM_AMETHYST_BUD || block == Blocks.LARGE_AMETHYST_BUD)) {
+            // Radar cận chiến phát hiện Thạch Anh
+            threatScore = 15; 
+        } else if (detectRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS) && state.get(Properties.AXIS) != Direction.Axis.Y) {
+            // Deepslate xoay ngang -> Chắc chắn 100% do người chơi đặt
+            threatScore = 15; 
+        }
 
-            // Cộng dồn số khối mọc thực tế trong phiên chơi hiện tại
-            int currentCount = realTimeGrowthCount.getOrDefault(cp, 0) + 1;
-            realTimeGrowthCount.put(cp, currentCount);
+        // Nếu khối này không khả nghi, bỏ qua
+        if (threatScore == 0) return;
 
-            // Khi số lượng biến động mọc thực tế đạt hoặc vượt ngưỡng cấu hình Sensitivity
-            if (currentCount >= sensitivity.get()) {
-                suspiciousChunks.add(cp);
-                ChatUtils.info("Detected ACTIVE growth/placement at chunk: " + cp.x + ", " + cp.z);
-            }
+        ChunkPos cp = new ChunkPos(pos);
+        if (suspiciousChunks.contains(cp)) return; // Đã báo đỏ rồi thì thôi
+
+        long currentTime = System.currentTimeMillis();
+
+        // 2. Xử lý cơ chế "Lãng quên" (Time-Decay)
+        ChunkData data = chunkDataMap.computeIfAbsent(cp, k -> new ChunkData());
+        if (currentTime - data.lastUpdateTime > DECAY_TIME_MS) {
+            data.score = 0; // Đã quá lâu không có biến động -> Reset điểm về 0
+        }
+
+        // 3. Cộng dồn điểm và cập nhật thời gian
+        data.score += threatScore;
+        data.lastUpdateTime = currentTime;
+
+        // 4. Kiểm tra ngưỡng nhạy cảm (Sensitivity bây giờ là Điểm số)
+        if (data.score >= sensitivity.get() * 5) { // Nhân 5 để scale điểm cho hợp lý
+            suspiciousChunks.add(cp);
+            ChatUtils.info("⚠️ [SusChunk] Báo động đỏ tại: " + cp.x + ", " + cp.z + " (Điểm Sus: " + data.score + ")");
         }
     }
 
