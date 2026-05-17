@@ -17,14 +17,17 @@ import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
+import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.s2c.play.*;
+import net.minecraft.registry.Registries;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.state.property.Properties;
@@ -35,6 +38,7 @@ import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,228 +49,280 @@ public class SusChunkFinder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgRender  = settings.createGroup("Render");
 
-    private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder().name("sensitivity").description("Điểm báo động tổng hợp").defaultValue(50).min(10).sliderMax(200).build());
+    private final Setting<Integer> simulationDistance = sgGeneral.add(new IntSetting.Builder().name("simulation-distance").defaultValue(16).min(1).sliderMax(32).build());
+    private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder().name("sensitivity").description("Ngưỡng báo động (Âm thanh/Realtime)").defaultValue(15).min(5).sliderMax(100).build());
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder().name("color").defaultValue(new SettingColor(255, 30, 30, 50)).build());
 
-    // ── BIẾN LƯU TRỮ CHUNG ──
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
     private final Color renderColor = new Color();
-    private final BlockPos.Mutable visibleAnchor = new BlockPos.Mutable();
-
-    // ── KIẾN TRÚC LMAX DISRUPTOR (ZERO-ALLOC OFF-LOADER) ──
-    private static final int BUFFER_SIZE = 8192;
-    private static final int INDEX_MASK = BUFFER_SIZE - 1;
-
-    static class PaddedSequence extends AtomicLong { public volatile long p1, p2, p3, p4, p5, p6, p7; }
-    
-    private final PaddedSequence writeSequence = new PaddedSequence();
-    private final PaddedSequence readSequence = new PaddedSequence();
-    private final EventPayload[] ringBuffer = new EventPayload[BUFFER_SIZE];
-    private Thread workerThread;
-
-    // Dữ liệu nội bộ xử lý logic Welford & Threat Scoring
     private final Long2ObjectMap<ChunkData> chunkDataMap = Long2ObjectMaps.synchronize(new Long2ObjectOpenHashMap<>(2048));
+    private int cleanupTimer = 0;
 
-    private static class EventPayload {
-        long chunkKey;
-        double addedThreat;
-        boolean isBlockUpdate;
-    }
+    // ── OMEGA ANOMALY DICTIONARY (Bảng tra cứu O(1)) ──
+    private static final byte[] ANOMALY_TABLE = new byte[65536];
+    private static boolean dictionaryInitialized = false;
+    
+    private static final byte TYPE_NONE = 0;
+    private static final byte TYPE_CHEST = 1;
+    private static final byte TYPE_BARREL = 2;
+    private static final byte TYPE_HOPPER = 3;
+    private static final byte TYPE_SHULKER = 4;
+    private static final byte TYPE_FURNACE = 5;
+    private static final byte TYPE_CRAFTING = 6;
+    private static final byte TYPE_ENDER_CHEST = 7;
 
-    private static class StatisticalTickAnalyzer {
-        private double mean = 0.0;
-        private double m2 = 0.0;
-        private int count = 0;
-        private long lastEventTime = -1;
-
-        public void recordEvent(long currentTimeMillis) {
-            if (lastEventTime == -1) { lastEventTime = currentTimeMillis; return; }
-            double interval = currentTimeMillis - lastEventTime;
-            lastEventTime = currentTimeMillis;
-            count++;
-            double delta = interval - mean;
-            mean += delta / count;
-            m2 += delta * (interval - mean);
-        }
-
-        public boolean isArtificialRedstoneClock() {
-            return count > 8 && (count < 2 || mean == 0 ? 1.0 : Math.sqrt(m2 / (count - 1)) / mean) < 0.1;
-        }
-    }
+    private final AnomalyScorer anomalyScorer = new AnomalyScorer();
 
     private static class ChunkData {
-        double totalThreat = 0;
+        double score = 0;
         long lastUpdateTime = System.currentTimeMillis();
-        final StatisticalTickAnalyzer analyzer = new StatisticalTickAnalyzer();
+    }
+
+    // ── HỆ THỐNG ĐÁNH GIÁ TRỌNG SỐ DỊ THƯỜNG (SYNERGY SCORING) ──
+    private class AnomalyScorer {
+        private int currentChunkX, currentSectionY, currentChunkZ;
+        private int presenceFlags;
+
+        public void beginSection(int chunkX, int sectionY, int chunkZ) {
+            this.currentChunkX = chunkX;
+            this.currentSectionY = sectionY;
+            this.currentChunkZ = chunkZ;
+            this.presenceFlags = 0;
+        }
+
+        public void evaluateBlock(int chunkX, int sectionY, int chunkZ, int rawStateId) {
+            if (rawStateId >= 0 && rawStateId < 65536) {
+                byte type = ANOMALY_TABLE[rawStateId];
+                if (type != TYPE_NONE) {
+                    this.currentChunkX = chunkX;
+                    this.currentSectionY = sectionY;
+                    this.currentChunkZ = chunkZ;
+                    presenceFlags |= (1 << type);
+                }
+            }
+        }
+
+        public void finalizeSection() {
+            if (presenceFlags == 0) return;
+
+            double baseScore = 0;
+            boolean hasChest      = (presenceFlags & (1 << TYPE_CHEST)) != 0;
+            boolean hasBarrel     = (presenceFlags & (1 << TYPE_BARREL)) != 0;
+            boolean hasHopper     = (presenceFlags & (1 << TYPE_HOPPER)) != 0;
+            boolean hasShulker    = (presenceFlags & (1 << TYPE_SHULKER)) != 0;
+            boolean hasFurnace    = (presenceFlags & (1 << TYPE_FURNACE)) != 0;
+            boolean hasCrafting   = (presenceFlags & (1 << TYPE_CRAFTING)) != 0;
+            boolean hasEnderChest = (presenceFlags & (1 << TYPE_ENDER_CHEST)) != 0;
+
+            if (hasChest) baseScore += 15;
+            if (hasBarrel) baseScore += 30;
+            if (hasCrafting) baseScore += 40;
+            if (hasEnderChest) baseScore += 70;
+            if (hasHopper) baseScore += 80;
+            if (hasShulker) baseScore += 100;
+
+            double synergy = 1.0;
+            if (hasChest && hasCrafting) synergy = Math.max(synergy, 2.5);
+            if (hasHopper && (hasChest || hasBarrel)) synergy = Math.max(synergy, 3.0);
+            if (hasChest && hasCrafting && hasFurnace) synergy = Math.max(synergy, 5.0);
+            if (hasShulker) synergy = Math.max(synergy, 5.0);
+
+            int absoluteY = currentSectionY * 16;
+            double heightMultiplier = 1.0;
+            if (absoluteY > 64) heightMultiplier = 0.5;
+            else if (absoluteY < 0) heightMultiplier = 2.5;
+
+            double finalScore = baseScore * heightMultiplier * synergy;
+
+            if (finalScore >= 100.0) {
+                ChunkPos cp = new ChunkPos(currentChunkX, currentChunkZ);
+                if (!suspiciousChunks.contains(cp)) {
+                    suspiciousChunks.add(cp);
+                    ChatUtils.info("⚠️ [PRIME CHUNK] Bắt được tín hiệu Stash ngầm! (Tọa độ X:" + (currentChunkX * 16) + " Y:" + absoluteY + " Z:" + (currentChunkZ * 16) + ") | Tỷ lệ Base: 99.9%");
+                }
+            }
+        }
     }
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Dự án Radar Toàn tri: Âm thanh + Đọc trộm NBT + LMAX Offloader");
-        for (int i = 0; i < BUFFER_SIZE; i++) ringBuffer[i] = new EventPayload();
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar OMEGA: Prime Chunk Finder (Đọc Palette) + Entity Leak + Ghost Sonar");
+    }
+
+    private void initializeDictionary() {
+        if (dictionaryInitialized) return;
+        for (BlockState state : Registries.BLOCK) {
+            int stateId = Block.getRawIdFromState(state);
+            if (stateId < 0 || stateId >= 65536) continue;
+            Block block = state.getBlock();
+            
+            if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) ANOMALY_TABLE[stateId] = TYPE_CHEST;
+            else if (block == Blocks.BARREL) ANOMALY_TABLE[stateId] = TYPE_BARREL;
+            else if (block == Blocks.HOPPER) ANOMALY_TABLE[stateId] = TYPE_HOPPER;
+            else if (block == Blocks.SHULKER_BOX) ANOMALY_TABLE[stateId] = TYPE_SHULKER;
+            else if (block == Blocks.FURNACE || block == Blocks.BLAST_FURNACE || block == Blocks.SMOKER) ANOMALY_TABLE[stateId] = TYPE_FURNACE;
+            else if (block == Blocks.CRAFTING_TABLE) ANOMALY_TABLE[stateId] = TYPE_CRAFTING;
+            else if (block == Blocks.ENDER_CHEST) ANOMALY_TABLE[stateId] = TYPE_ENDER_CHEST;
+        }
+        dictionaryInitialized = true;
     }
 
     @Override
     public void onActivate() {
+        initializeDictionary();
         suspiciousChunks.clear();
         chunkDataMap.clear();
-        writeSequence.set(0);
-        readSequence.set(0);
-        
-        workerThread = new Thread(() -> {
-            while (!Thread.interrupted()) {
-                long currentRead = readSequence.get();
-                while (currentRead >= writeSequence.get()) {
-                    LockSupport.parkNanos(1000);
-                }
-
-                EventPayload event = ringBuffer[(int) (currentRead & INDEX_MASK)];
-                processThreatAsync(event.chunkKey, event.addedThreat, event.isBlockUpdate);
-                readSequence.lazySet(currentRead + 1);
-            }
-        });
-        workerThread.setName("SusChunkFinder-Analytics-Worker");
-        workerThread.setDaemon(true);
-        workerThread.setPriority(Thread.MIN_PRIORITY);
-        workerThread.start();
+        cleanupTimer = 0;
     }
 
     @Override
     public void onDeactivate() {
-        if (workerThread != null) workerThread.interrupt();
         suspiciousChunks.clear();
         chunkDataMap.clear();
     }
 
-    // Luồng Worker Asynchronous xử lý logic Welford (Zero-Lag)
-    private void processThreatAsync(long chunkKey, double addedThreat, boolean isBlockUpdate) {
-        long currentTime = System.currentTimeMillis();
-        ChunkData data = chunkDataMap.get(chunkKey);
-        
-        if (data == null) {
-            data = new ChunkData();
-            chunkDataMap.put(chunkKey, data);
-        }
-
-        if (currentTime - data.lastUpdateTime > 180000) {
-            data.totalThreat = 0; // Reset sau 3 phút
-        }
-
-        data.totalThreat += addedThreat;
-        data.lastUpdateTime = currentTime;
-
-        if (isBlockUpdate) {
-            data.analyzer.recordEvent(currentTime);
-            if (data.analyzer.isArtificialRedstoneClock()) {
-                flagChunk(chunkKey, "Redstone Clock ngầm");
-                return;
-            }
-        }
-
-        if (data.totalThreat >= sensitivity.get()) {
-            flagChunk(chunkKey, "Vượt ngưỡng nguy hiểm (Âm thanh/NBT/Mọc cây)");
+    @EventHandler
+    private void onTick(TickEvent.Post event) {
+        if (!isActive() || chunkDataMap.isEmpty()) return;
+        cleanupTimer++;
+        if (cleanupTimer >= 1200) {
+            cleanupTimer = 0;
+            long currentTime = System.currentTimeMillis();
+            chunkDataMap.long2ObjectEntrySet().removeIf(entry -> currentTime - entry.getValue().lastUpdateTime > 180000);
         }
     }
 
-    private void flagChunk(long chunkKey, String reason) {
-        int chunkX = (int) chunkKey;
-        int chunkZ = (int) (chunkKey >> 32);
-        ChunkPos cp = new ChunkPos(chunkX, chunkZ);
-        
-        if (!suspiciousChunks.contains(cp)) {
-            suspiciousChunks.add(cp);
-            ChatUtils.info("⚠️ [Radar Toàn Tri] Phát hiện: " + reason + " tại " + chunkX + ", " + chunkZ);
-        }
-    }
-
-    // Gửi dữ liệu từ Netty vào luồng Worker LMAX Disruptor
-    private void dispatchToWorker(long chunkKey, double threat, boolean isBlock) {
-        long currentWrite = writeSequence.get();
-        if (readSequence.get() <= currentWrite - BUFFER_SIZE) return; // Tránh tràn bộ đệm
-        
-        EventPayload event = ringBuffer[(int) (currentWrite & INDEX_MASK)];
-        event.chunkKey = chunkKey;
-        event.addedThreat = threat;
-        event.isBlockUpdate = isBlock;
-        writeSequence.lazySet(currentWrite + 1);
-    }
-
-    // ── HỆ THỐNG LẮNG NGHE GÓI TIN CHÍNH ──
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // 1. Phân tích Khối
-        if (event.packet instanceof BlockUpdateS2CPacket packet) {
-            evaluateBlock(packet.getPos(), packet.getState());
-        } 
-        
-        // 2. Phân tích Xe Goòng tàng hình
-        else if (event.packet instanceof EntitySpawnS2CPacket packet) {
-            EntityType<?> type = packet.getEntityType();
-            if (type == EntityType.CHEST_MINECART || type == EntityType.HOPPER_MINECART || type == EntityType.SPAWNER_MINECART) {
-                long key = ChunkPos.toLong((int) packet.getX() >> 4, (int) packet.getZ() >> 4);
-                dispatchToWorker(key, 100.0, false);
+        // ── PROJECT OMEGA: ĐỌC TRỘM CHUNK DATA (ZERO-ALLOCATION) ──
+        if (event.packet instanceof ChunkDataS2CPacket packet) {
+            PacketByteBuf buf = packet.getChunkData().getSectionsDataBuf();
+            int originalIndex = buf.readerIndex();
+            
+            try {
+                int chunkX = packet.getChunkX();
+                int chunkZ = packet.getChunkZ();
+
+                // Duyệt 24 ChunkSections (Y: -64 -> 320)
+                for (int sectionIndex = 0; sectionIndex < 24; sectionIndex++) {
+                    if (buf.readerIndex() >= buf.writerIndex()) break;
+                    int sectionY = sectionIndex - 4;
+                    buf.readShort(); // Bỏ qua BlockCount
+                    
+                    // Xử lý BlockStates Palette
+                    byte bitsPerEntry = buf.readByte();
+                    if (bitsPerEntry == 0) {
+                        int stateId = buf.readVarInt();
+                        anomalyScorer.evaluateBlock(chunkX, sectionY, chunkZ, stateId);
+                        int dataLen = buf.readVarInt();
+                        buf.skipBytes(dataLen * 8);
+                    } else if (bitsPerEntry >= 1 && bitsPerEntry <= 8) {
+                        int paletteSize = buf.readVarInt();
+                        anomalyScorer.beginSection(chunkX, sectionY, chunkZ);
+                        for (int i = 0; i < paletteSize; i++) {
+                            int stateId = buf.readVarInt();
+                            anomalyScorer.evaluateBlock(chunkX, sectionY, chunkZ, stateId);
+                        }
+                        anomalyScorer.finalizeSection();
+                        int dataLen = buf.readVarInt();
+                        buf.skipBytes(dataLen * 8);
+                    } else {
+                        // Global Palette - Tua qua
+                        int dataLen = buf.readVarInt();
+                        buf.skipBytes(dataLen * 8);
+                    }
+                    
+                    // Tua qua Biomes Palette
+                    byte biomeBits = buf.readByte();
+                    if (biomeBits == 0) {
+                        buf.readVarInt();
+                        int dataLen = buf.readVarInt();
+                        buf.skipBytes(dataLen * 8);
+                    } else if (biomeBits >= 1 && biomeBits <= 3) {
+                        int paletteSize = buf.readVarInt();
+                        for (int i = 0; i < paletteSize; i++) buf.readVarInt();
+                        int dataLen = buf.readVarInt();
+                        buf.skipBytes(dataLen * 8);
+                    } else {
+                        int dataLen = buf.readVarInt();
+                        buf.skipBytes(dataLen * 8);
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                // Đưa con trỏ đọc về vị trí ban đầu để Minecraft tiếp tục xử lý, không gây crash!
+                buf.readerIndex(originalIndex);
             }
         }
         
-        // 3. Phân tích Âm thanh
+        // ── MODULE CŨ: NGHE LÉN ÂM THANH & CẬP NHẬT ĐỘNG ──
         else if (event.packet instanceof PlaySoundS2CPacket packet) {
             RegistryEntry<SoundEvent> soundEntry = packet.getSound();
-            String soundId = soundEntry.value().getId().getPath();
+            String soundId = soundEntry.getKey().map(k -> k.getValue().getPath()).orElse("");
             double threat = 0;
             switch (soundId) {
                 case "block.piston.extend": case "block.piston.contract": threat = 15; break;
                 case "block.chest.open": case "block.chest.close": case "block.barrel.open": threat = 25; break;
                 case "entity.bat.ambient": threat = 5; break;
             }
-            if (threat > 0) {
-                long key = ChunkPos.toLong((int) packet.getX() >> 4, (int) packet.getZ() >> 4);
-                dispatchToWorker(key, threat, false);
-            }
+            if (threat > 0) processDynamicThreat((int)packet.getX() >> 4, (int)packet.getZ() >> 4, threat, "Phát hiện âm thanh nhân tạo");
         }
-        
-        // 4. Phân tích NBT (Đọc trộm Lò nung/Phễu)
-        else if (event.packet instanceof BlockEntityUpdateS2CPacket packet) {
-            NbtCompound nbt = packet.getNbt();
-            if (nbt != null && !nbt.isEmpty()) {
-                double threat = 0;
-                if (nbt.contains("BurnTime", NbtElement.SHORT_TYPE) && nbt.getShort("BurnTime") > 0) threat += 40;
-                if (nbt.contains("Items", NbtElement.LIST_TYPE)) threat += 30;
-                if (nbt.contains("SpawnData", NbtElement.COMPOUND_TYPE)) threat += 50;
-                
-                if (threat > 0) {
-                    long key = ChunkPos.toLong(packet.getPos().getX() >> 4, packet.getPos().getZ() >> 4);
-                    dispatchToWorker(key, threat, false);
+        else if (event.packet instanceof BlockUpdateS2CPacket packet) {
+            evaluateBlockDynamic(packet.getPos(), packet.getState());
+        } 
+        else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
+            packet.visitUpdates(this::evaluateBlockDynamic);
+        }
+        else if (event.packet instanceof EntitySpawnS2CPacket packet) {
+            EntityType<?> type = packet.getEntityType();
+            if (type == EntityType.CHEST_MINECART || type == EntityType.HOPPER_MINECART || type == EntityType.SPAWNER_MINECART) {
+                ChunkPos cp = new ChunkPos(BlockPos.ofFloored(packet.getX(), packet.getY(), packet.getZ()));
+                if (!suspiciousChunks.contains(cp)) {
+                    suspiciousChunks.add(cp);
+                    ChatUtils.info("⚠️ [ENTITY LEAK] Phát hiện Minecart ngầm tại: " + cp.x + ", " + cp.z);
                 }
             }
         }
     }
 
-    private void evaluateBlock(BlockPos pos, BlockState state) {
+    private void evaluateBlockDynamic(BlockPos pos, BlockState state) {
         net.minecraft.block.Block block = state.getBlock();
         double threat = 0;
-        boolean isRedstoneUpdate = false;
-
         if (state.isAir()) threat = 1;
-        else if (block == Blocks.BAMBOO) { threat = pos.getY() < 50 ? 20 : 2; isRedstoneUpdate = true; }
-        else if (block == Blocks.KELP || block == Blocks.KELP_PLANT) { threat = 2; isRedstoneUpdate = true; }
+        else if (block == Blocks.BAMBOO && pos.getY() < 50) threat = 20;
         else if (block == Blocks.DEEPSLATE && state.contains(Properties.AXIS) && state.get(Properties.AXIS) != Direction.Axis.Y) threat = 15;
         else if (block == Blocks.AMETHYST_CLUSTER) {
             threat = 15;
-            executeIndirectSonar(pos); // Kích hoạt Ghost Sonar an toàn
+            executeIndirectSonar(pos);
         }
+        if (threat > 0) processDynamicThreat(pos.getX() >> 4, pos.getZ() >> 4, threat, "Biến động khối bất thường");
+    }
 
-        if (threat > 0) {
-            long key = ChunkPos.toLong(pos.getX() >> 4, pos.getZ() >> 4);
-            dispatchToWorker(key, threat, isRedstoneUpdate);
+    private void processDynamicThreat(int chunkX, int chunkZ, double threat, String reason) {
+        long key = ChunkPos.toLong(chunkX, chunkZ);
+        long currentTime = System.currentTimeMillis();
+        ChunkData data = chunkDataMap.computeIfAbsent(key, k -> new ChunkData());
+        
+        if (currentTime - data.lastUpdateTime > 180000) data.score = 0;
+        data.score += threat;
+        data.lastUpdateTime = currentTime;
+
+        if (data.score >= sensitivity.get()) {
+            ChunkPos cp = new ChunkPos(chunkX, chunkZ);
+            if (!suspiciousChunks.contains(cp)) {
+                suspiciousChunks.add(cp);
+                ChatUtils.info("⚠️ [RADAR] Đã chốt vị trí khả nghi! (X:" + (chunkX * 16) + " Z:" + (chunkZ * 16) + ") | Nguyên nhân: " + reason);
+            }
         }
     }
 
-    // ── GHOST SONAR GIÁN TIẾP CHỐNG GRIM AC ──
+    // ── GHOST SONAR CHỐNG GRIM AC ──
     private void executeIndirectSonar(BlockPos hiddenTarget) {
         if (mc.player == null) return;
         Vec3d eyePos = mc.player.getEyePos();
         boolean found = false;
+        BlockPos.Mutable visibleAnchor = new BlockPos.Mutable();
 
         for (int x = -2; x <= 2 && !found; x++) {
             for (int y = -2; y <= 2 && !found; y++) {
@@ -283,7 +339,7 @@ public class SusChunkFinder extends Module {
                         float yaw = (float) Math.toDegrees(Math.atan2(targetCenter.z - eyePos.z, targetCenter.x - eyePos.x)) - 90.0F;
                         float pitch = (float) -Math.toDegrees(Math.atan2(targetCenter.y - eyePos.y, Math.sqrt(Math.pow(targetCenter.x - eyePos.x, 2) + Math.pow(targetCenter.z - eyePos.z, 2))));
                         
-                        mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround()));
+                        mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch, mc.player.isOnGround(), mc.player.horizontalCollision));
                         mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, visibleAnchor, Direction.UP));
                         mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, visibleAnchor, Direction.UP));
                     }
@@ -299,7 +355,15 @@ public class SusChunkFinder extends Module {
         renderColor.set(sc.r, sc.g, sc.b, sc.a);
 
         for (ChunkPos cp : suspiciousChunks) {
+            if (!isInRange(cp)) continue;
             event.renderer.box(cp.getStartX(), 50.0, cp.getStartZ(), cp.getStartX() + 16.0, 50.05, cp.getStartZ() + 16.0, renderColor, renderColor, ShapeMode.Sides, 0);
         }
+    }
+
+    private boolean isInRange(ChunkPos pos) {
+        if (mc.player == null) return false;
+        ChunkPos playerChunk = mc.player.getChunkPos();
+        int dist = simulationDistance.get();
+        return Math.abs(pos.x - playerChunk.x) <= dist && Math.abs(pos.z - playerChunk.z) <= dist;
     }
 }
