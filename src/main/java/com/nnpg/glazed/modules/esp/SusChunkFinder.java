@@ -148,20 +148,23 @@ public class SusChunkFinder extends Module {
         super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar OMEGA: Prime Chunk Finder (Đọc Palette) + Entity Leak + Ghost Sonar");
     }
 
+    // LỖI ĐÃ ĐƯỢC SỬA TẠI ĐÂY: Lặp qua từng Block, sau đó lặp qua tất cả BlockStates của Block đó
     private void initializeDictionary() {
         if (dictionaryInitialized) return;
-        for (BlockState state : Registries.BLOCK) {
-            int stateId = Block.getRawIdFromState(state);
-            if (stateId < 0 || stateId >= 65536) continue;
-            Block block = state.getBlock();
-            
-            if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) ANOMALY_TABLE[stateId] = TYPE_CHEST;
-            else if (block == Blocks.BARREL) ANOMALY_TABLE[stateId] = TYPE_BARREL;
-            else if (block == Blocks.HOPPER) ANOMALY_TABLE[stateId] = TYPE_HOPPER;
-            else if (block == Blocks.SHULKER_BOX) ANOMALY_TABLE[stateId] = TYPE_SHULKER;
-            else if (block == Blocks.FURNACE || block == Blocks.BLAST_FURNACE || block == Blocks.SMOKER) ANOMALY_TABLE[stateId] = TYPE_FURNACE;
-            else if (block == Blocks.CRAFTING_TABLE) ANOMALY_TABLE[stateId] = TYPE_CRAFTING;
-            else if (block == Blocks.ENDER_CHEST) ANOMALY_TABLE[stateId] = TYPE_ENDER_CHEST;
+        
+        for (Block block : Registries.BLOCK) {
+            for (BlockState state : block.getStateManager().getStates()) {
+                int stateId = Block.getRawIdFromState(state);
+                if (stateId < 0 || stateId >= 65536) continue;
+                
+                if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) ANOMALY_TABLE[stateId] = TYPE_CHEST;
+                else if (block == Blocks.BARREL) ANOMALY_TABLE[stateId] = TYPE_BARREL;
+                else if (block == Blocks.HOPPER) ANOMALY_TABLE[stateId] = TYPE_HOPPER;
+                else if (block == Blocks.SHULKER_BOX) ANOMALY_TABLE[stateId] = TYPE_SHULKER;
+                else if (block == Blocks.FURNACE || block == Blocks.BLAST_FURNACE || block == Blocks.SMOKER) ANOMALY_TABLE[stateId] = TYPE_FURNACE;
+                else if (block == Blocks.CRAFTING_TABLE) ANOMALY_TABLE[stateId] = TYPE_CRAFTING;
+                else if (block == Blocks.ENDER_CHEST) ANOMALY_TABLE[stateId] = TYPE_ENDER_CHEST;
+            }
         }
         dictionaryInitialized = true;
     }
