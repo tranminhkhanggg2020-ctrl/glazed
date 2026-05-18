@@ -19,10 +19,12 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.EntityType;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -48,6 +50,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").description("Phát hiện farm Tảo").defaultValue(true).build());
     private final Setting<Boolean> detectAmethyst = sgDetect.add(new BoolSetting.Builder().name("amethyst").description("Dò Thạch anh & Ghost Sonar").defaultValue(true).build());
     private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(true).build());
+    private final Setting<Boolean> detectDroppedItems = sgDetect.add(new BoolSetting.Builder().name("dropped-items").description("Báo ngay khi có vật phẩm rơi trên đất").defaultValue(true).build());
 
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder().name("color").defaultValue(new SettingColor(255, 30, 30, 50)).build());
     private final Setting<Integer> alpha = sgRender.add(new IntSetting.Builder().name("alpha").defaultValue(50).min(0).sliderMax(255).build());
@@ -59,18 +62,15 @@ public class SusChunkFinder extends Module {
     private int cleanupTimer = 0;
     private static final long DECAY_TIME_MS = 180000; // 3 phút lãng quên
 
-    // Lớp dữ liệu chỉ tập trung vào việc đếm số lượng khối mọc
     private static class ChunkData {
         int score = 0;
         long lastUpdateTime = System.currentTimeMillis();
-        
-        // Phục vụ cơ chế dự đoán AFK (Cây mọc đồng loạt)
         int updatesInLast10Sec = 0;
         long firstUpdateInWindow = 0;
     }
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Tinh Gọn: Chuyên trị bắt quả tang Farm AFK mọc khối.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Tinh Gọn: Săn Farm AFK & Vật phẩm vứt lại.");
     }
 
     @Override
@@ -86,7 +86,6 @@ public class SusChunkFinder extends Module {
         chunkDataMap.clear();
     }
 
-    // Dọn dẹp RAM định kỳ
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (!isActive() || chunkDataMap.isEmpty()) return;
@@ -98,16 +97,29 @@ public class SusChunkFinder extends Module {
         }
     }
 
-    // ── CHỈ BẮT GÓI TIN CẬP NHẬT KHỐI (Không bắt Âm thanh/Entity nữa) ──
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
+        // 1. Bắt cập nhật khối (Mọc cây/Đặt khối)
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
             evaluateBlockThreat(packet.getPos(), packet.getState());
         } 
         else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
             packet.visitUpdates(this::evaluateBlockThreat);
+        }
+        
+        // 2. TÍNH NĂNG MỚI: ĐÓN ĐẦU VẬT PHẨM RƠI (ITEM ENTITY LEAK)
+        else if (detectDroppedItems.get() && event.packet instanceof EntitySpawnS2CPacket packet) {
+            if (packet.getEntityType() == EntityType.ITEM) {
+                // Trích xuất tọa độ thực thể vật phẩm rơi
+                ChunkPos cp = new ChunkPos(BlockPos.ofFloored(packet.getX(), packet.getY(), packet.getZ()));
+                
+                if (!suspiciousChunks.contains(cp)) {
+                    suspiciousChunks.add(cp);
+                    ChatUtils.info("⚠️ [ITEM FOUND] Phát hiện vật phẩm rơi chưa biến mất tại Chunk: X:" + cp.x + " Z:" + cp.z);
+                }
+            }
         }
     }
 
@@ -116,26 +128,25 @@ public class SusChunkFinder extends Module {
         boolean isAFKPredictableBlock = false;
         net.minecraft.block.Block block = state.getBlock();
 
-        // 1. Chấm điểm các loại khối
         if (state.isAir()) {
-            threatScore = 1; // Có khối bị đập vỡ
+            threatScore = 1; 
         } else if (detectBamboo.get() && block == Blocks.BAMBOO) {
             threatScore = (pos.getY() < 50) ? 20 : 2; 
-            isAFKPredictableBlock = true; // Tre là dấu hiệu AFK
+            isAFKPredictableBlock = true;
         } else if (detectKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
             threatScore = 2;
-            isAFKPredictableBlock = true; // Tảo là dấu hiệu AFK
+            isAFKPredictableBlock = true;
         } else if (detectAmethyst.get() && (block == Blocks.AMETHYST_CLUSTER || block == Blocks.SMALL_AMETHYST_BUD || block == Blocks.MEDIUM_AMETHYST_BUD || block == Blocks.LARGE_AMETHYST_BUD)) {
             threatScore = 15;
-            executeIndirectSonar(pos); // Giữ nguyên Ghost Sonar để ép lộ hầm Thạch anh
+            executeIndirectSonar(pos); 
         } else if (detectRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS) && state.get(Properties.AXIS) != Direction.Axis.Y) {
-            threatScore = 15; // Người chơi đặt khối
+            threatScore = 15; 
         }
 
-        if (threatScore == 0) return; // Khối tự nhiên không quan tâm thì bỏ qua
+        if (threatScore == 0) return;
 
         ChunkPos cp = new ChunkPos(pos);
-        if (suspiciousChunks.contains(cp)) return; // Đã đánh dấu đỏ thì không cần tính tiếp
+        if (suspiciousChunks.contains(cp)) return;
 
         long key = ChunkPos.toLong(cp.x, cp.z);
         long currentTime = System.currentTimeMillis();
@@ -146,7 +157,6 @@ public class SusChunkFinder extends Module {
             chunkDataMap.put(key, data);
         }
 
-        // Xử lý Lãng quên nếu quá lâu không có biến động
         if (currentTime - data.lastUpdateTime > DECAY_TIME_MS) {
             data.score = 0; 
             data.updatesInLast10Sec = 0;
@@ -155,37 +165,31 @@ public class SusChunkFinder extends Module {
         data.score += threatScore;
         data.lastUpdateTime = currentTime;
 
-        // ── THUẬT TOÁN BẮT FARM AFK (Cây mọc đồng loạt) ──
         if (isAFKPredictableBlock) {
             if (data.updatesInLast10Sec == 0) {
                 data.firstUpdateInWindow = currentTime;
             }
-            
             if (currentTime - data.firstUpdateInWindow < 10000) {
-                data.updatesInLast10Sec++; // Trong 10 giây có bao nhiêu cây mọc?
+                data.updatesInLast10Sec++;
             } else {
                 data.updatesInLast10Sec = 1;
                 data.firstUpdateInWindow = currentTime;
             }
-            
-            // Nếu có > 5 cây mọc lên trong vòng 10 giây -> CHẮC CHẮN LÀ FARM AFK ĐANG CHẠY
             if (data.updatesInLast10Sec > 5) {
                 if (!suspiciousChunks.contains(cp)) {
                     suspiciousChunks.add(cp);
-                    ChatUtils.info("⚠️ [AFK RADAR] Báo động! Phát hiện cây mọc ĐỒNG LOẠT (Farm AFK) tại: X:" + cp.x + " Z:" + cp.z);
+                    ChatUtils.info("⚠️ [AFK RADAR] Báo động! Phát hiện cây mọc ĐỒNG LOẠT tại: X:" + cp.x + " Z:" + cp.z);
                     return;
                 }
             }
         }
 
-        // ── Báo động khi đạt đủ điểm Sensitivity ──
         if (data.score >= sensitivity.get()) { 
             suspiciousChunks.add(cp);
-            ChatUtils.info("⚠️ [RADAR] Đã chốt vị trí do có thay đổi khối bất thường tại: X:" + cp.x + " Z:" + cp.z);
+            ChatUtils.info("⚠️ [RADAR] Thay đổi khối bất thường tại: X:" + cp.x + " Z:" + cp.z);
         }
     }
 
-    // Ghost Sonar: Vũ khí phòng thân chống Anti-Xray khi săn Thạch Anh
     private void executeIndirectSonar(BlockPos hiddenTarget) {
         if (mc.player == null) return;
         Vec3d eyePos = mc.player.getEyePos();
@@ -218,14 +222,13 @@ public class SusChunkFinder extends Module {
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (suspiciousChunks.isEmpty() || mc.player == null) return;
+        if (suspiciousChunks.isEmpty() || mc.player == null || mc.world == null) return;
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
 
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
-            // Ghim chặt vị trí hiển thị ở Y = 50
             double x1 = cp.getStartX();
             double z1 = cp.getStartZ();
             event.renderer.box(x1, 50.0, z1, x1 + 16.0, 50.05, z1 + 16.0, renderColor, renderColor, ShapeMode.Sides, 0);
