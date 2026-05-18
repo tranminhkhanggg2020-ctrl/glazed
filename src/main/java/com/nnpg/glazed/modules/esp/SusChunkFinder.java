@@ -1,11 +1,9 @@
 package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.GlazedAddon;
-import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
-import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
@@ -33,10 +31,12 @@ import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
-import meteordevelopment.meteorclient.events.world.TickEvent;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 public class SusChunkFinder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -50,74 +50,189 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> detectKelp = sgDetect.add(new BoolSetting.Builder().name("kelp").description("Phát hiện farm Tảo").defaultValue(true).build());
     private final Setting<Boolean> detectAmethyst = sgDetect.add(new BoolSetting.Builder().name("amethyst").description("Dò Thạch anh & Ghost Sonar").defaultValue(true).build());
     private final Setting<Boolean> detectRotatedDeepslate = sgDetect.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(true).build());
-    private final Setting<Boolean> detectDroppedItems = sgDetect.add(new BoolSetting.Builder().name("dropped-items").description("Báo ngay khi có vật phẩm rơi trên đất").defaultValue(true).build());
+    private final Setting<Boolean> detectAir = sgDetect.add(new BoolSetting.Builder().name("air-updates").description("Báo khi khối bị đập (Tắt khi ra biển)").defaultValue(false).build());
+    private final Setting<Boolean> detectDroppedItems = sgDetect.add(new BoolSetting.Builder().name("dropped-items").description("Vật phẩm rơi (Tắt khi ra biển)").defaultValue(false).build());
 
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder().name("color").defaultValue(new SettingColor(255, 30, 30, 50)).build());
     private final Setting<Integer> alpha = sgRender.add(new IntSetting.Builder().name("alpha").defaultValue(50).min(0).sliderMax(255).build());
 
-    // ── LƯU TRỮ ZERO-ALLOCATION ──
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
-    private final Long2ObjectMap<ChunkData> chunkDataMap = Long2ObjectMaps.synchronize(new Long2ObjectOpenHashMap<>(2048));
     private final Color renderColor = new Color();
     private int cleanupTimer = 0;
-    private static final long DECAY_TIME_MS = 180000; // 3 phút lãng quên
 
-    private static class ChunkData {
-        int score = 0;
-        long lastUpdateTime = System.currentTimeMillis();
-        int updatesInLast10Sec = 0;
-        long firstUpdateInWindow = 0;
+    // ==========================================
+    // CLAUDE'S CORE: LOCK-FREE SPATIAL TELEMETRY
+    // ==========================================
+
+    private static final long EMPTY_KEY = Long.MIN_VALUE;
+
+    public static final class LockFreeLongMap<V> {
+        private final AtomicLongArray keys;
+        private final AtomicReferenceArray<V> values;
+        private final int mask;
+
+        public LockFreeLongMap(int capacity) {
+            int cap = Integer.highestOneBit(capacity - 1) << 1;
+            this.keys = new AtomicLongArray(cap);
+            this.values = new AtomicReferenceArray<>(cap);
+            this.mask = cap - 1;
+            for (int i = 0; i < cap; i++) keys.set(i, EMPTY_KEY);
+        }
+
+        public V get(long key) {
+            int idx = hash(key);
+            while (true) {
+                long existing = keys.get(idx);
+                if (existing == key) return values.get(idx);
+                if (existing == EMPTY_KEY) return null;
+                idx = (idx + 1) & mask;
+            }
+        }
+
+        public void put(long key, V value) {
+            int idx = hash(key);
+            while (true) {
+                long existing = keys.get(idx);
+                if (existing == key) { values.set(idx, value); return; }
+                if (existing == EMPTY_KEY) {
+                    if (keys.compareAndSet(idx, EMPTY_KEY, key)) { values.set(idx, value); return; }
+                    continue;
+                }
+                idx = (idx + 1) & mask;
+            }
+        }
+
+        private int hash(long key) {
+            key = (key ^ (key >>> 30)) * 0xbf58476d1ce4e5b9L;
+            key = (key ^ (key >>> 27)) * 0x94d049bb133111ebL;
+            return (int)(key ^ (key >>> 31)) & mask;
+        }
+        
+        public void clearOldEntries(long nowNano) {
+            for (int i = 0; i < keys.length(); i++) {
+                if (keys.get(i) != EMPTY_KEY) {
+                    V val = values.get(i);
+                    if (val instanceof PaddedCellState) {
+                        if (nowNano - ((PaddedCellState) val).lastUpdateNano > 180_000_000_000L) {
+                            keys.set(i, EMPTY_KEY);
+                            values.set(i, null);
+                        }
+                    }
+                }
+            }
+        }
     }
 
+    public static final class TokenBucketState {
+        private static final long SCALE = 1_000_000_000L;
+        private static final long MAX_TOKENS = 5L * SCALE;   // Cửa sổ 5 block update
+        private static final long REFILL_RATE_NS = SCALE / 5;  // 0.5 khối / giây
+
+        private final AtomicLong tokens;
+        private final AtomicLong lastRefillNano;
+
+        public TokenBucketState(long nowNano) {
+            this.tokens = new AtomicLong(MAX_TOKENS);
+            this.lastRefillNano = new AtomicLong(nowNano);
+        }
+
+        public boolean consumeAndCheckBurst(long nowNano) {
+            refill(nowNano);
+            while (true) {
+                long current = tokens.get();
+                if (current < SCALE) return true; // Cạn sạch token -> Báo động AFK Farm
+                if (tokens.compareAndSet(current, current - SCALE)) return false;
+            }
+        }
+
+        private void refill(long nowNano) {
+            while (true) {
+                long last = lastRefillNano.get();
+                long elapsed = nowNano - last;
+                if (elapsed <= 0) return;
+
+                long toAdd = elapsed / REFILL_RATE_NS * SCALE;
+                if (toAdd == 0) return;
+
+                long newLast = last + (toAdd / SCALE) * REFILL_RATE_NS;
+                if (!lastRefillNano.compareAndSet(last, newLast)) continue;
+                tokens.updateAndGet(t -> Math.min(t + toAdd, MAX_TOKENS));
+                return;
+            }
+        }
+    }
+
+    public static final class PaddedCellState {
+        protected long p01, p02, p03, p04, p05, p06, p07;
+        public volatile long score = 0;
+        
+        protected long q01, q02, q03, q04, q05, q06, q07;
+        protected long s01, s02, s03, s04, s05, s06, s07;
+        protected long r01, r02, r03, r04, r05, r06, r07;
+        
+        public volatile long lastUpdateNano = 0;
+        
+        protected long t01, t02, t03, t04, t05, t06, t07;
+
+        public final TokenBucketState bucket;
+        public PaddedCellState(long nowNano) { this.bucket = new TokenBucketState(nowNano); }
+    }
+
+    // Khởi tạo bản đồ 65k ô chứa dữ liệu mượt mà, ko lag
+    private final LockFreeLongMap<PaddedCellState> cellMap = new LockFreeLongMap<>(65536);
+
+    // ==========================================
+    // LOGIC MODULE METEOR CLIENT
+    // ==========================================
+
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Tinh Gọn: Săn Farm AFK & Vật phẩm vứt lại.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar V2.0: IoT Lock-Free & Leaky Bucket AFK Predictor");
     }
 
     @Override
     public void onActivate() {
         suspiciousChunks.clear();
-        chunkDataMap.clear();
         cleanupTimer = 0;
     }
 
     @Override
     public void onDeactivate() {
         suspiciousChunks.clear();
-        chunkDataMap.clear();
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (!isActive() || chunkDataMap.isEmpty()) return;
+        if (!isActive()) return;
         cleanupTimer++;
         if (cleanupTimer >= 1200) {
             cleanupTimer = 0;
-            long currentTime = System.currentTimeMillis();
-            chunkDataMap.long2ObjectEntrySet().removeIf(entry -> currentTime - entry.getValue().lastUpdateTime > DECAY_TIME_MS * 2);
+            // Xóa rác 3 phút để tiết kiệm bộ đệm
+            cellMap.clearOldEntries(System.nanoTime());
         }
+    }
+
+    private static long encodeKey(int x, int z) {
+        return ((long) x << 32) | (z & 0xFFFFFFFFL);
     }
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // 1. Bắt cập nhật khối (Mọc cây/Đặt khối)
         if (event.packet instanceof BlockUpdateS2CPacket packet) {
             evaluateBlockThreat(packet.getPos(), packet.getState());
         } 
         else if (event.packet instanceof ChunkDeltaUpdateS2CPacket packet) {
             packet.visitUpdates(this::evaluateBlockThreat);
         }
-        
-        // 2. TÍNH NĂNG MỚI: ĐÓN ĐẦU VẬT PHẨM RƠI (ITEM ENTITY LEAK)
         else if (detectDroppedItems.get() && event.packet instanceof EntitySpawnS2CPacket packet) {
             if (packet.getEntityType() == EntityType.ITEM) {
-                // Trích xuất tọa độ thực thể vật phẩm rơi
-                ChunkPos cp = new ChunkPos(BlockPos.ofFloored(packet.getX(), packet.getY(), packet.getZ()));
-                
+                int chunkX = (int)packet.getX() >> 4;
+                int chunkZ = (int)packet.getZ() >> 4;
+                ChunkPos cp = new ChunkPos(chunkX, chunkZ);
                 if (!suspiciousChunks.contains(cp)) {
                     suspiciousChunks.add(cp);
-                    ChatUtils.info("⚠️ [ITEM FOUND] Phát hiện vật phẩm rơi chưa biến mất tại Chunk: X:" + cp.x + " Z:" + cp.z);
+                    ChatUtils.info("⚠️ [ITEM LEAK] Phát hiện vật phẩm rơi tại X:" + cp.getStartX() + " Z:" + cp.getStartZ());
                 }
             }
         }
@@ -128,7 +243,7 @@ public class SusChunkFinder extends Module {
         boolean isAFKPredictableBlock = false;
         net.minecraft.block.Block block = state.getBlock();
 
-        if (state.isAir()) {
+        if (detectAir.get() && state.isAir()) {
             threatScore = 1; 
         } else if (detectBamboo.get() && block == Blocks.BAMBOO) {
             threatScore = (pos.getY() < 50) ? 20 : 2; 
@@ -145,48 +260,37 @@ public class SusChunkFinder extends Module {
 
         if (threatScore == 0) return;
 
-        ChunkPos cp = new ChunkPos(pos);
+        int chunkX = pos.getX() >> 4;
+        int chunkZ = pos.getZ() >> 4;
+        ChunkPos cp = new ChunkPos(chunkX, chunkZ);
         if (suspiciousChunks.contains(cp)) return;
 
-        long key = ChunkPos.toLong(cp.x, cp.z);
-        long currentTime = System.currentTimeMillis();
-        
-        ChunkData data = chunkDataMap.get(key);
-        if (data == null) {
-            data = new ChunkData();
-            chunkDataMap.put(key, data);
+        long key = encodeKey(chunkX, chunkZ);
+        long nowNano = System.nanoTime();
+
+        PaddedCellState cell = cellMap.get(key);
+        if (cell == null) {
+            cellMap.put(key, new PaddedCellState(nowNano));
+            cell = cellMap.get(key);
         }
 
-        if (currentTime - data.lastUpdateTime > DECAY_TIME_MS) {
-            data.score = 0; 
-            data.updatesInLast10Sec = 0;
-        }
+        cell.lastUpdateNano = nowNano;
+        cell.score += threatScore;
 
-        data.score += threatScore;
-        data.lastUpdateTime = currentTime;
-
+        // ── THUẬT TOÁN LEAKY BUCKET BẮT FARM AFK ──
         if (isAFKPredictableBlock) {
-            if (data.updatesInLast10Sec == 0) {
-                data.firstUpdateInWindow = currentTime;
-            }
-            if (currentTime - data.firstUpdateInWindow < 10000) {
-                data.updatesInLast10Sec++;
-            } else {
-                data.updatesInLast10Sec = 1;
-                data.firstUpdateInWindow = currentTime;
-            }
-            if (data.updatesInLast10Sec > 5) {
+            if (cell.bucket.consumeAndCheckBurst(nowNano)) {
                 if (!suspiciousChunks.contains(cp)) {
                     suspiciousChunks.add(cp);
-                    ChatUtils.info("⚠️ [AFK RADAR] Báo động! Phát hiện cây mọc ĐỒNG LOẠT tại: X:" + cp.x + " Z:" + cp.z);
+                    ChatUtils.info("🔥 [FARM AFK] Phát hiện luồng cây mọc đồng loạt tại X:" + cp.getStartX() + " Z:" + cp.getStartZ());
                     return;
                 }
             }
         }
 
-        if (data.score >= sensitivity.get()) { 
+        if (cell.score >= sensitivity.get()) { 
             suspiciousChunks.add(cp);
-            ChatUtils.info("⚠️ [RADAR] Thay đổi khối bất thường tại: X:" + cp.x + " Z:" + cp.z);
+            ChatUtils.info("⚠️ [RADAR] Thay đổi khối khả nghi tại X:" + cp.getStartX() + " Z:" + cp.getStartZ());
         }
     }
 
@@ -222,16 +326,14 @@ public class SusChunkFinder extends Module {
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (suspiciousChunks.isEmpty() || mc.player == null || mc.world == null) return;
+        if (suspiciousChunks.isEmpty() || mc.player == null) return;
 
         SettingColor sc = color.get();
         renderColor.set(sc.r, sc.g, sc.b, alpha.get());
 
         for (ChunkPos cp : suspiciousChunks) {
             if (!isInRange(cp)) continue;
-            double x1 = cp.getStartX();
-            double z1 = cp.getStartZ();
-            event.renderer.box(x1, 50.0, z1, x1 + 16.0, 50.05, z1 + 16.0, renderColor, renderColor, ShapeMode.Sides, 0);
+            event.renderer.box(cp.getStartX(), 50.0, cp.getStartZ(), cp.getStartX() + 16.0, 50.05, cp.getStartZ() + 16.0, renderColor, renderColor, ShapeMode.Sides, 0);
         }
     }
 
