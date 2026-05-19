@@ -2,9 +2,11 @@ package com.nnpg.glazed;
 
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
-import meteordevelopment.meteorclient.systems.commands.Command;
+// Đã sửa đường dẫn import Command của Meteor ở đây:
+import meteordevelopment.meteorclient.commands.Command; 
 import net.minecraft.command.CommandSource;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.client.MinecraftClient; // Đã thêm thư viện này
 import java.util.List;
 
 import static com.mojang.brigadier.Command.SINGLE_SUCCESS;
@@ -36,8 +38,8 @@ public class ChunkSyncCommand extends Command {
                 int x = IntegerArgumentType.getInteger(context, "x");
                 int z = IntegerArgumentType.getInteger(context, "z");
                 
-                // Gọi hàm logic của bạn
-                ChunkSyncBypass.bypassChunkVerification(mc.world, x, z);
+                // Đã sửa mc.world thành MinecraftClient.getInstance().world
+                ChunkSyncBypass.bypassChunkVerification(MinecraftClient.getInstance().world, x, z);
                 info("Chunk bypass executed tai X: " + x + ", Z: " + z);
                 
                 return SINGLE_SUCCESS;
