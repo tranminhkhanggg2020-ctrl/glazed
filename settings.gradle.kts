@@ -8,6 +8,3 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-
-include(":chunksync-exploit")
-project(":chunksync-exploit").projectDir = file("exploits/chunksync")
