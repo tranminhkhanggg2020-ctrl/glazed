@@ -6,7 +6,11 @@
   "client": [
     "HandledScreenMixin",
     "DefaultSettingsWidgetFactoryAccessor",
-    "DefaultSettingsWidgetFactoryMixin"
+    "DefaultSettingsWidgetFactoryMixin",
+    "MixinClientWorld",
+    "MixinChunkManager",
+    "MixinThreadedAnvilChunkStorage",
+    "MixinChunkDataS2CPacket"
   ],
   "injectors": {
     "defaultRequire": 1
