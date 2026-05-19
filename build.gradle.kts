@@ -86,3 +86,17 @@ repositories {
     }
 }
 
+dependencies {
+    // ... existing dependencies
+    
+    // Chunk Sync Exploit
+    implementation project(':chunksync-exploit')
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs += 'src/main/java/net/glazed/exploit'
+        }
+    }
+}
