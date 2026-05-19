@@ -1,4 +1,4 @@
-package net.glazed.exploit.chunksync;
+package com.nnpg.glazed;
 
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.world.chunk.ChunkStatus;
