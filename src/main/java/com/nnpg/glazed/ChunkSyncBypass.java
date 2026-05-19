@@ -3,6 +3,19 @@ package com.nnpg.glazed;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.world.World;
+import net.minecraft.util.math.ChunkPos;
+import net.minecraft.world.chunk.UpgradeData;
+import net.minecraft.world.tick.ChunkTickScheduler;
+import net.minecraft.world.chunk.ChunkSection;
+import net.minecraft.world.chunk.ChunkStatusChangeListener;
+import net.minecraft.world.chunk.light.BlendingData;
+import java.lang.reflect.Method;
+import java.lang.reflect.Field;
+import java.lang.reflect.Constructor;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.world.chunk.ChunkStatus;
+import net.minecraft.world.chunk.WorldChunk;
 import java.lang.reflect.Method;
 
 public class ChunkSyncBypass {
