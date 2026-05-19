@@ -1,4 +1,4 @@
-package net.glazed.exploit.chunksync;
+package com.nnpg.glazed;
 
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.WorldChunk;
