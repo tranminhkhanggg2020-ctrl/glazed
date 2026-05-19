@@ -9,5 +9,5 @@ pluginManagement {
     }
 }
 
-include ':chunksync-exploit'
-project(':chunksync-exploit').projectDir = new File('exploits/chunksync')
+include(":chunksync-exploit")
+project(":chunksync-exploit").projectDir = file("exploits/chunksync")
