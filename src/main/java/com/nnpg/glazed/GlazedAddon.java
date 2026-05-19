@@ -98,6 +98,7 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new ShieldBreaker());
         Modules.get().add(new InvisESP());
         Modules.get().add(new AutoTotemOrder());
+        Modules.get().add(new ChunkSyncExploit());
         Modules.get().add(new LightESP());
         Modules.get().add(new PremiumTunnelBaseFinder());
         Modules.get().add(new AdminList());
