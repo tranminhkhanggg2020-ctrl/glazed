@@ -135,7 +135,6 @@ public class SusChunkFinder extends Module {
     }
 
     private void handleChunkData(ChunkDataS2CPacket packet) {
-        // [FIX 1.21.4] getX() -> getChunkX(), getZ() -> getChunkZ()
         int cx = packet.getChunkX();
         int cz = packet.getChunkZ();
 
@@ -147,7 +146,6 @@ public class SusChunkFinder extends Module {
         if (susChunks.containsKey(key) && susChunks.get(key) >= sensitivity.get() * 10) return;
 
         int susScore = 0;
-        // [FIX 1.21.4] getBlockEntities() -> getBlockEntityData()
         int blockEntityCount = packet.getBlockEntityData().size();
         int nbtThreshold = sensitivity.get() * 10;
 
@@ -199,7 +197,6 @@ public class SusChunkFinder extends Module {
     private int computeHeuristicScore(WorldChunk chunk) {
         int score = 0;
         int minY = mc.world.getBottomY();
-        // [FIX 1.21.4] Tính toán an toàn TopY bằng BottomY + Height
         int maxY = mc.world.getBottomY() + mc.world.getHeight();
 
         int airCount        = 0;
@@ -216,4 +213,140 @@ public class SusChunkFinder extends Module {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
                     Block block = chunk.getBlockState(bp).getBlock();
 
-                    if (block == Blocks.AIR || block == Blocks.
+                    if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
+                        airCount++;
+                    } else if (block == Blocks.DEEPSLATE || block == Blocks.COBBLED_DEEPSLATE) {
+                        deepslateCount++;
+                    } else if (block == Blocks.AMETHYST_CLUSTER || block == Blocks.BUDDING_AMETHYST || block == Blocks.AMETHYST_BLOCK) {
+                        amethystCount++;
+                    } else if (isNaturalTrackedBlock(block)) {
+                        naturalCount++;
+                    }
+                }
+            }
+        }
+
+        int totalUnderground = 16 * 16 * Math.abs(scanMaxY - minY);
+
+        if (filterAmethyst.get()) {
+            boolean hasDeepslate = deepslateCount > 50;
+            if (hasDeepslate && amethystCount < 5) {
+                score += 3;
+            }
+        }
+
+        if (totalUnderground > 0) {
+            float airRatio = (float) airCount / totalUnderground;
+            if (airRatio > 0.35f) {
+                score += (int)((airRatio - 0.35f) * 20);
+            }
+        }
+
+        if (shouldCheckNaturalBlocks() && naturalCount == 0 && deepslateCount > 100) {
+            score += 2;
+        }
+
+        if (filterRotatedDeepslate.get()) {
+            score += countRotatedDeepslate(chunk, cp, minY, scanMaxY);
+        }
+
+        return score;
+    }
+
+    private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int maxY) {
+        int count = 0;
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = minY; y < maxY; y++) {
+                    BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
+                    var state = chunk.getBlockState(bp);
+                    if (state.getBlock() == Blocks.DEEPSLATE) {
+                        var axis = state.get(PillarBlock.AXIS);
+                        if (axis != net.minecraft.util.math.Direction.Axis.Y) {
+                            count++;
+                        }
+                    }
+                }
+            }
+        }
+        return count / 5;
+    }
+
+    private void flagChunkIfSus(long key, int cx, int cz, int score) {
+        if (score <= 0) return;
+        int existing = susChunks.getOrDefault(key, 0);
+        int newScore = existing + score;
+        susChunks.put(key, newScore);
+
+        if (newScore >= sensitivity.get()) {
+            renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Render
+    // -------------------------------------------------------------------------
+
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (mc.world == null || renderCache.isEmpty()) return;
+
+        int a = alpha.get();
+        Color sideColor   = new Color(255, 0, 0, a);
+        Color lineColor   = new Color(255, 0, 0, Math.min(255, a + 80));
+
+        int minY = mc.world.getBottomY();
+        int maxY = mc.world.getBottomY() + mc.world.getHeight();
+
+        pruneDistantChunks();
+
+        for (var entry : renderCache.long2ObjectEntrySet()) {
+            int[] coords = entry.getValue();
+            int bx = coords[0];
+            int bz = coords[1];
+
+            event.renderer.box(
+                bx,       minY, bz,
+                bx + 16,  maxY, bz + 16,
+                sideColor, lineColor,
+                ShapeMode.Both, 0
+            );
+        }
+    }
+
+    private void pruneDistantChunks() {
+        if (mc.player == null) return;
+        int playerCx = mc.player.getChunkPos().x;
+        int playerCz = mc.player.getChunkPos().z;
+        int dist = simulationDistance.get();
+
+        renderCache.long2ObjectEntrySet().removeIf(entry -> {
+            ChunkPos cp = new ChunkPos(entry.getLongKey());
+            boolean tooFar = Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
+            if (tooFar) susChunks.remove(entry.getLongKey());
+            return tooFar;
+        });
+    }
+
+    private boolean isWithinSimulationDistance(int cx, int cz) {
+        if (mc.player == null) return false;
+        int pcx = mc.player.getChunkPos().x;
+        int pcz = mc.player.getChunkPos().z;
+        int d = simulationDistance.get();
+        return Math.abs(cx - pcx) <= d && Math.abs(cz - pcz) <= d;
+    }
+
+    private boolean isNaturalTrackedBlock(Block block) {
+        if (filterKelp.get()       && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) return true;
+        if (filterCaveVines.get()  && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) return true;
+        if (filterVines.get()      && block == Blocks.VINE) return true;
+        if (filterAmethyst.get()   && (block == Blocks.AMETHYST_CLUSTER || block == Blocks.BUDDING_AMETHYST || block == Blocks.AMETHYST_BLOCK)) return true;
+        if (filterBamboo.get()     && (block == Blocks.BAMBOO || block == Blocks.BAMBOO_SAPLING)) return true;
+        if (filterBeeNest.get()    && block == Blocks.BEE_NEST) return true;
+        return false;
+    }
+
+    private boolean shouldCheckNaturalBlocks() {
+        return filterKelp.get() || filterCaveVines.get() || filterVines.get() || filterBamboo.get() || filterBeeNest.get();
+    }
+}
