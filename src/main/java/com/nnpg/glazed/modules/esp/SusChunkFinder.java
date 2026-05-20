@@ -614,7 +614,7 @@ public class SusChunkFinder extends Module {
         if (renderLabels.get()) {
             Vec3d center = new Vec3d(x1 + 8, y + 2, z1 + 8);
             if (mc.gameRenderer.getCamera().getPos().distanceTo(center) < 100) {
-                event.renderer.text(label, center.x, center.y, center.z, true);
+               // event.renderer.text(label, center.x, center.y, center.z, true);
             }
         }
     }
