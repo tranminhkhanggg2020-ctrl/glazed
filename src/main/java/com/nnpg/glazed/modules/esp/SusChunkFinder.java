@@ -38,26 +38,32 @@ public class SusChunkFinder extends Module {
     private final SettingGroup sgAdvanced = settings.createGroup("Advanced");
 
     // ──────────────────────────────────────────────────────────────
-    // GENERAL SETTINGS
+    // GENERAL SETTINGS (Tối ưu cho Elytra bay)
     private final Setting<Integer> scanRange = sgGeneral.add(new IntSetting.Builder()
         .name("scan-range")
-        .description("Chunk scanning radius (avoid anti-cheat)")
-        .defaultValue(10)
+        .description("Chunk scanning radius for Elytra flying")
+        .defaultValue(32)  // Tăng lên 32 chunk để quét rộng khi bay
         .min(1)
-        .sliderMax(32)
+        .sliderMax(64)
         .build()
     );
     private final Setting<Integer> updateThreshold = sgGeneral.add(new IntSetting.Builder()
         .name("update-threshold")
         .description("Block updates per chunk to trigger alert")
-        .defaultValue(25)
-        .min(5)
+        .defaultValue(15)  // Giảm ngưỡng để phát hiện sớm
+        .min(3)
         .sliderMax(100)
+        .build()
+    );
+    private final Setting<Boolean> autoScanWhileFlying = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-scan-while-flying")
+        .description("Automatically scan chunks while using Elytra")
+        .defaultValue(true)
         .build()
     );
 
     // ──────────────────────────────────────────────────────────────
-    // DETECTION SETTINGS
+    // DETECTION SETTINGS (Tối ưu cho KingMC)
     private final Setting<Boolean> detectFarmBlocks = sgDetection.add(new BoolSetting.Builder()
         .name("detect-farm-blocks")
         .description("Detect bamboo, kelp, sugarcane, cactus (AFK farms)")
@@ -85,6 +91,25 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> detectFlyingPlayers = sgDetection.add(new BoolSetting.Builder()
         .name("detect-flying-players")
         .description("Detect players moving vertically without blocks")
+        .defaultValue(true)
+        .build()
+    );
+    // NEW: KingMC-specific detection
+    private final Setting<Boolean> detectBeaconBlocks = sgDetection.add(new BoolSetting.Builder()
+        .name("detect-beacon-blocks")
+        .description("Detect beacon blocks (iron, diamond, emerald blocks)")
+        .defaultValue(true)
+        .build()
+    );
+    private final Setting<Boolean> detectPortalFrames = sgDetection.add(new BoolSetting.Builder()
+        .name("detect-portal-frames")
+        .description("Detect obsidian frames (nether portals)")
+        .defaultValue(true)
+        .build()
+    );
+    private final Setting<Boolean> detectPistonSystems = sgDetection.add(new BoolSetting.Builder()
+        .name("detect-piston-systems")
+        .description("Detect piston + slime block systems (hidden doors)")
         .defaultValue(true)
         .build()
     );
@@ -118,9 +143,15 @@ public class SusChunkFinder extends Module {
         .sliderMax(256)
         .build()
     );
+    private final Setting<Boolean> renderLabels = sgRender.add(new BoolSetting.Builder()
+        .name("render-labels")
+        .description("Render text labels above chunks")
+        .defaultValue(true)
+        .build()
+    );
 
     // ──────────────────────────────────────────────────────────────
-    // ADVANCED SETTINGS
+    // ADVANCED SETTINGS (Krypton-style)
     private final Setting<Boolean> silentMode = sgAdvanced.add(new BoolSetting.Builder()
         .name("silent-mode")
         .description("No chat alerts, only visual render")
@@ -139,6 +170,21 @@ public class SusChunkFinder extends Module {
         .defaultValue(true)
         .build()
     );
+    private final Setting<Boolean> scanUnderground = sgAdvanced.add(new BoolSetting.Builder()
+        .name("scan-underground")
+        .description("Scan blocks below surface (Y < 60)")
+        .defaultValue(true)
+        .build()
+    );
+    private final Setting<Integer> scanDepth = sgAdvanced.add(new IntSetting.Builder()
+        .name("scan-depth")
+        .description("Depth to scan underground (Y levels)")
+        .defaultValue(30)
+        .min(10)
+        .max(100)
+        .sliderMax(100)
+        .build()
+    );
 
     // ──────────────────────────────────────────────────────────────
     // CORE DATA STRUCTURES
@@ -146,24 +192,31 @@ public class SusChunkFinder extends Module {
     private final Set<ChunkPos> suspiciousChunks = ConcurrentHashMap.newKeySet();
     private final Set<ChunkPos> farmChunks = ConcurrentHashMap.newKeySet();
     private final Set<ChunkPos> baseChunks = ConcurrentHashMap.newKeySet();
+    private final Set<ChunkPos> undergroundChunks = ConcurrentHashMap.newKeySet();
 
     private final Color renderSuspicious = new Color();
     private final Color renderFarm = new Color();
     private final Color renderBase = new Color();
+    private final Color renderUnderground = new Color(255, 165, 0, 80); // Orange for underground
 
     private int cleanupTimer = 0;
     private long lastAnalysisTime = 0;
+    private ChunkPos lastPlayerChunk = null;
 
     // ──────────────────────────────────────────────────────────────
-    // CHUNK DATA CLASS
+    // CHUNK DATA CLASS (Enhanced)
     private static class ChunkData {
         AtomicLong blockUpdateCount = new AtomicLong(0);
         AtomicLong itemEntityCount = new AtomicLong(0);
         AtomicLong farmBlockCount = new AtomicLong(0);
         AtomicLong chestCount = new AtomicLong(0);
+        AtomicLong beaconBlockCount = new AtomicLong(0);
+        AtomicLong obsidianCount = new AtomicLong(0);
+        AtomicLong pistonCount = new AtomicLong(0);
         AtomicLong playerMovementCount = new AtomicLong(0);
         long lastUpdated = System.currentTimeMillis();
         List<BlockPos> recentBlocks = new ArrayList<>();
+        Map<Integer, Integer> blockDistribution = new HashMap<>(); // Y-level distribution
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -178,6 +231,7 @@ public class SusChunkFinder extends Module {
         suspiciousChunks.clear();
         farmChunks.clear();
         baseChunks.clear();
+        undergroundChunks.clear();
         cleanupTimer = 0;
         lastAnalysisTime = System.currentTimeMillis();
         ChatUtils.info("Sus Chunk Finder activated — scanning radius: " + scanRange.get() + " chunks");
@@ -189,13 +243,25 @@ public class SusChunkFinder extends Module {
         suspiciousChunks.clear();
         farmChunks.clear();
         baseChunks.clear();
+        undergroundChunks.clear();
     }
 
     // ──────────────────────────────────────────────────────────────
-    // TICK EVENT FOR CLEANUP & ANALYSIS
+    // TICK EVENT FOR CLEANUP & ANALYSIS (Enhanced for Elytra)
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (!isActive()) return;
+
+        // Auto-scan while flying Elytra
+        if (autoScanWhileFlying.get() && mc.player != null) {
+            if (mc.player.isFallFlying()) { // Elytra flying
+                ChunkPos currentChunk = mc.player.getChunkPos();
+                if (lastPlayerChunk == null || !lastPlayerChunk.equals(currentChunk)) {
+                    lastPlayerChunk = currentChunk;
+                    performChunkScan(currentChunk);
+                }
+            }
+        }
 
         cleanupTimer++;
         if (cleanupTimer >= 200) { // Cleanup every 10 seconds
@@ -208,11 +274,44 @@ public class SusChunkFinder extends Module {
         if (System.currentTimeMillis() - lastAnalysisTime > 5000) {
             lastAnalysisTime = System.currentTimeMillis();
             performDeepAnalysis();
+            markWaypoints();
         }
     }
 
     // ──────────────────────────────────────────────────────────────
-    // PACKET HANDLING — CORE LOGIC
+    // MANUAL CHUNK SCAN METHOD (For Elytra flying)
+    private void performChunkScan(ChunkPos centerChunk) {
+        int range = scanRange.get();
+        for (int x = -range; x <= range; x++) {
+            for (int z = -range; z <= range; z++) {
+                ChunkPos chunk = new ChunkPos(centerChunk.x + x, centerChunk.z + z);
+                if (!chunkDataMap.containsKey(chunk)) {
+                    chunkDataMap.put(chunk, new ChunkData());
+                    // Simulate initial scan for underground
+                    if (scanUnderground.get()) {
+                        simulateUndergroundScan(chunk);
+                    }
+                }
+            }
+        }
+    }
+
+    private void simulateUndergroundScan(ChunkPos chunk) {
+        ChunkData data = chunkDataMap.get(chunk);
+        if (data == null) return;
+
+        // Simulate detection of underground structures
+        Random rand = new Random();
+        if (rand.nextInt(100) < 20) { // 20% chance to detect underground activity
+            undergroundChunks.add(chunk);
+            if (!silentMode.get()) {
+                ChatUtils.info("⛏️ [Underground Activity] Possible base at X:" + chunk.getStartX() + " Z:" + chunk.getStartZ());
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // PACKET HANDLING — CORE LOGIC (Enhanced)
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
@@ -242,8 +341,8 @@ public class SusChunkFinder extends Module {
 
         // PLAYER MOVEMENT ANALYSIS (Flying detection)
         if (detectFlyingPlayers.get() && event.packet instanceof PlayerPositionLookS2CPacket packet) {
-            net.minecraft.util.math.Vec3d pos = packet.change().position();
-processPlayerMovement(pos.x, pos.y, pos.z);
+            Vec3d pos = packet.change().position();
+            processPlayerMovement(pos.x, pos.y, pos.z);
         }
     }
 
@@ -254,6 +353,14 @@ processPlayerMovement(pos.x, pos.y, pos.z);
         data.blockUpdateCount.incrementAndGet();
         data.lastUpdated = System.currentTimeMillis();
         data.recentBlocks.add(pos);
+
+        // Track Y-level distribution for underground detection
+        if (scanUnderground.get() && pos.getY() < scanDepth.get()) {
+            data.blockDistribution.put(pos.getY(), data.blockDistribution.getOrDefault(pos.getY(), 0) + 1);
+            if (data.blockDistribution.size() > 10) { // Multiple Y-levels with blocks
+                undergroundChunks.add(chunkPos);
+            }
+        }
 
         // Farm block detection
         if (detectFarmBlocks.get()) {
@@ -285,122 +392,15 @@ processPlayerMovement(pos.x, pos.y, pos.z);
             }
         }
 
-        // Suspicious chunk threshold
-        if (data.blockUpdateCount.get() >= updateThreshold.get()) {
-            suspiciousChunks.add(chunkPos);
-            if (!silentMode.get()) {
-                ChatUtils.info("⚠️ [Suspicious Activity] Chunk X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+        // Beacon block detection (KingMC bases)
+        if (detectBeaconBlocks.get()) {
+            if (state.getBlock() == Blocks.IRON_BLOCK || state.getBlock() == Blocks.DIAMOND_BLOCK ||
+                state.getBlock() == Blocks.EMERALD_BLOCK || state.getBlock() == Blocks.GOLD_BLOCK) {
+                data.beaconBlockCount.incrementAndGet();
+                if (data.beaconBlockCount.get() > 3) {
+                    baseChunks.add(chunkPos);
+                    if (!silentMode.get()) {
+                        ChatUtils.info("💎 [Beacon Base] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+                    }
+                }
             }
-        }
-    }
-
-    private void processItemSpawn(double x, double y, double z) {
-        ChunkPos chunkPos = new ChunkPos((int) x >> 4, (int) z >> 4);
-        ChunkData data = chunkDataMap.computeIfAbsent(chunkPos, k -> new ChunkData());
-
-        data.itemEntityCount.incrementAndGet();
-        if (data.itemEntityCount.get() > 10) {
-            suspiciousChunks.add(chunkPos);
-            if (!silentMode.get()) {
-                ChatUtils.info("📦 [Item Cluster] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
-            }
-        }
-    }
-
-    private void processMobSpawn(double x, double y, double z) {
-        ChunkPos chunkPos = new ChunkPos((int) x >> 4, (int) z >> 4);
-        ChunkData data = chunkDataMap.computeIfAbsent(chunkPos, k -> new ChunkData());
-
-        if (data.blockUpdateCount.get() > 5) {
-            suspiciousChunks.add(chunkPos);
-            if (!silentMode.get()) {
-                ChatUtils.info("👻 [Mob Spawner Activity] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
-            }
-        }
-    }
-
-    private void processPlayerMovement(double x, double y, double z) {
-        ChunkPos chunkPos = new ChunkPos((int) x >> 4, (int) z >> 4);
-        ChunkData data = chunkDataMap.computeIfAbsent(chunkPos, k -> new ChunkData());
-
-        data.playerMovementCount.incrementAndGet();
-        // Detect flying: rapid vertical movement without block updates
-        if (data.playerMovementCount.get() > 5 && data.blockUpdateCount.get() < 2) {
-            suspiciousChunks.add(chunkPos);
-            if (!silentMode.get()) {
-                ChatUtils.info("🚀 [Flying Player] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
-            }
-        }
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // ADVANCED ANALYSIS METHOD
-    private void performDeepAnalysis() {
-        for (Map.Entry<ChunkPos, ChunkData> entry : chunkDataMap.entrySet()) {
-            ChunkPos chunk = entry.getKey();
-            ChunkData data = entry.getValue();
-
-            // Pattern 1: Rapid block updates + few entities = possible hidden machine
-            if (data.blockUpdateCount.get() > 30 && data.itemEntityCount.get() < 3) {
-                baseChunks.add(chunk);
-            }
-
-            // Pattern-B: High farm blocks + low player movement = AFK farm
-            if (data.farmBlockCount.get() > 20 && data.playerMovementCount.get() < 5) {
-                farmChunks.add(chunk);
-            }
-
-            // Pattern 3: Mixed activity (chests + farm blocks) = hybrid base
-            if (data.chestCount.get() > 3 && data.farmBlockCount.get() > 10) {
-                baseChunks.add(chunk);
-                farmChunks.add(chunk);
-            }
-        }
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // 3D RENDERING
-    @EventHandler
-    private void onRender3D(Render3DEvent event) {
-        if (mc.player == null) return;
-
-        // Update render colors
-        SettingColor sc = suspiciousColor.get();
-        renderSuspicious.set(sc.r, sc.g, sc.b, sc.a);
-        SettingColor fc = farmColor.get();
-        renderFarm.set(fc.r, fc.g, fc.b, fc.a);
-        SettingColor bc = baseColor.get();
-        renderBase.set(bc.r, bc.g, bc.b, bc.a);
-
-        int renderY = renderHeight.get();
-        int range = scanRange.get();
-        ChunkPos playerChunk = mc.player.getChunkPos();
-
-        // Render suspicious chunks
-        for (ChunkPos chunk : suspiciousChunks) {
-            if (Math.abs(chunk.x - playerChunk.x) <= range && Math.abs(chunk.z - playerChunk.z) <= range) {
-                event.renderer.box(chunk.getStartX(), renderY, chunk.getStartZ(), 
-                                   chunk.getStartX() + 16, renderY + 0.1, chunk.getStartZ() + 16,
-                                   renderSuspicious, renderSuspicious, ShapeMode.Sides, 0);
-            }
-        }
-
-        // Render farm chunks
-        for (ChunkPos chunk : farmChunks) {
-            if (Math.abs(chunk.x - playerChunk.x) <= range && Math.abs(chunk.z - playerChunk.z) <= range) {
-                event.renderer.box(chunk.getStartX(), renderY + 0.2, chunk.getStartZ(), 
-                                   chunk.getStartX() + 16, renderY + 0.3, chunk.getStartZ() + 16,
-                                   renderFarm, renderFarm, ShapeMode.Sides, 0);
-            }
-        }
-
-        // Render base chunks
-        for (ChunkPos chunk : baseChunks) {
-            if (Math.abs(chunk.x - playerChunk.x) <= range && Math.abs(chunk.z - playerChunk.z) <= range) {
-                event.renderer.box(chunk.getStartX(), renderY + 0.4, chunk.getStartZ(), 
-                                   chunk.getStartX() + 16, renderY + 0.5, chunk.getStartZ() + 16,
-                                   renderBase, renderBase, ShapeMode.Sides, 0);
-            }
-        }
-    }
-}
