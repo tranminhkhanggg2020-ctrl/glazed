@@ -273,6 +273,7 @@ public class SusChunkFinder extends Module {
         // Periodic deep analysis
         if (System.currentTimeMillis() - lastAnalysisTime > 5000) {
             lastAnalysisTime = System.currentTimeMillis();
+            // LƯU Ý: Nếu bạn đã xóa hàm performDeepAnalysis() và markWaypoints() thì phải xóa luôn 2 dòng này để tránh lỗi "cannot find symbol"
             performDeepAnalysis();
             markWaypoints();
         }
@@ -327,6 +328,7 @@ public class SusChunkFinder extends Module {
         // ENTITY SPAWN ANALYSIS (Items, mobs)
         if (detectItemClusters.get() && event.packet instanceof EntitySpawnS2CPacket packet) {
             if (packet.getEntityType() == EntityType.ITEM) {
+                // LƯU Ý: Cần khai báo hàm processItemSpawn
                 processItemSpawn(packet.getX(), packet.getY(), packet.getZ());
             }
             if (detectMobSpawners.get() && (
@@ -335,13 +337,16 @@ public class SusChunkFinder extends Module {
                 packet.getEntityType() == EntityType.CREEPER ||
                 packet.getEntityType() == EntityType.SPIDER
             )) {
+                // LƯU Ý: Cần khai báo hàm processMobSpawn
                 processMobSpawn(packet.getX(), packet.getY(), packet.getZ());
             }
         }
 
         // PLAYER MOVEMENT ANALYSIS (Flying detection)
         if (detectFlyingPlayers.get() && event.packet instanceof PlayerPositionLookS2CPacket packet) {
-            Vec3d pos = packet.change().position();
+            // Đã fix lỗi toạ độ của bản 1.21.4
+            net.minecraft.util.math.Vec3d pos = packet.change().position();
+            // LƯU Ý: Cần khai báo hàm processPlayerMovement
             processPlayerMovement(pos.x, pos.y, pos.z);
         }
     }
@@ -403,7 +408,11 @@ public class SusChunkFinder extends Module {
                         ChatUtils.info("💎 [Beacon Base] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
                     }
                 }
-            }         
-        }
-    }
-}
+            }
+        } // ĐÓNG LỆNH IF (detectBeaconBlocks.get())
+    } // ĐÓNG HÀM processBlockUpdate()
+
+    // LƯU Ý ⚠️: NẾU TRONG FILE CŨ CỦA BẠN VẪN CÒN CÁC HÀM KHÁC NHƯ processItemSpawn(), 
+    // processPlayerMovement(), performDeepAnalysis()... THÌ BẠN HÃY DÁN NỐI TIẾP VÀO KHÚC NÀY NHÉ!
+
+} // ĐÓNG CLASS SusChunkFinder
