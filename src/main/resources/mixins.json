@@ -1,18 +1,5 @@
-{
-  "required": true,
-  "package": "com.nnpg.glazed.mixins",
-  "compatibilityLevel": "JAVA_17",
-  "mixins": [],
-  "client": [
+"client": [
     "HandledScreenMixin",
     "DefaultSettingsWidgetFactoryAccessor",
-    "DefaultSettingsWidgetFactoryMixin",
-    "MixinClientWorld",
-    "MixinChunkManager",
-    "MixinThreadedAnvilChunkStorage",
-    "MixinChunkDataS2CPacket"
+    "DefaultSettingsWidgetFactoryMixin"
   ],
-  "injectors": {
-    "defaultRequire": 1
-  }
-}
