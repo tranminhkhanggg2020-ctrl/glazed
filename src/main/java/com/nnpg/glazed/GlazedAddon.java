@@ -38,6 +38,7 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new AHSell());
         Modules.get().add(new AnchorMacro());
         Modules.get().add(new OneByOneHoles());
+        Modules.get().add(new KryptonAura());
         Modules.get().add(new KelpESP());
         Modules.get().add(new DripstoneESP());
         Modules.get().add(new RotatedDeepslateESP());
