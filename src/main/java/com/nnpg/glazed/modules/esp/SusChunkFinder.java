@@ -253,18 +253,23 @@ public class SusChunkFinder extends Module {
         return score;
     }
 
-    private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int maxY) {
+private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int maxY) {
         int count = 0;
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 for (int y = minY; y < maxY; y++) {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
                     var state = chunk.getBlockState(bp);
+                    
                     if (state.getBlock() == Blocks.DEEPSLATE) {
-                        // [FIX]: Gọi thẳng đường dẫn tuyệt đối của Properties.AXIS để không cần import
-                        var axis = state.get(net.minecraft.state.property.Properties.AXIS);
-                        if (axis != net.minecraft.util.math.Direction.Axis.Y) {
-                            count++;
+                        // Quét qua toàn bộ thuộc tính của BlockState hiện tại (Bypass lỗi Mappings)
+                        for (net.minecraft.state.property.Property<?> prop : state.getProperties()) {
+                            if (prop.getName().equals("axis")) {
+                                // Nếu trục (axis) không phải là "y" (không cắm thẳng đứng) -> do người đặt
+                                if (!String.valueOf(state.get(prop)).equalsIgnoreCase("y")) {
+                                    count++;
+                                }
+                                break; // Tìm thấy axis rồi thì không cần quét các thuộc tính khác nữa
                         }
                     }
                 }
