@@ -253,7 +253,7 @@ public class SusChunkFinder extends Module {
         return score;
     }
 
-private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int maxY) {
+    private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int maxY) {
         int count = 0;
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
@@ -262,14 +262,14 @@ private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int m
                     var state = chunk.getBlockState(bp);
                     
                     if (state.getBlock() == Blocks.DEEPSLATE) {
-                        // Quét qua toàn bộ thuộc tính của BlockState hiện tại (Bypass lỗi Mappings)
-                        for (net.minecraft.state.property.Property<?> prop : state.getProperties()) {
-                            if (prop.getName().equals("axis")) {
-                                // Nếu trục (axis) không phải là "y" (không cắm thẳng đứng) -> do người đặt
-                                if (!String.valueOf(state.get(prop)).equalsIgnoreCase("y")) {
-                                    count++;
-                                }
-                                break; // Tìm thấy axis rồi thì không cần quét các thuộc tính khác nữa
+                        // ULTIMATE BYPASS: Biến toàn bộ trạng thái của khối thành một chuỗi chữ (String)
+                        // Ví dụ kết quả sẽ là: "Block{minecraft:deepslate}[axis=z]"
+                        String stateStr = state.toString().toLowerCase();
+                        
+                        // Nếu trong chuỗi có thông số trục (axis=), nhưng lại KHÔNG PHẢI là trục dọc (axis=y)
+                        // Nghĩa là cục Deepslate này đã bị người chơi đặt nằm ngang!
+                        if (stateStr.contains("axis=") && !stateStr.contains("axis=y")) {
+                            count++;
                         }
                     }
                 }
