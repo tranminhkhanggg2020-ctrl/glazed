@@ -273,7 +273,6 @@ public class SusChunkFinder extends Module {
         // Periodic deep analysis
         if (System.currentTimeMillis() - lastAnalysisTime > 5000) {
             lastAnalysisTime = System.currentTimeMillis();
-            // LƯU Ý: Nếu bạn đã xóa hàm performDeepAnalysis() và markWaypoints() thì phải xóa luôn 2 dòng này để tránh lỗi "cannot find symbol"
             performDeepAnalysis();
             markWaypoints();
         }
@@ -328,7 +327,6 @@ public class SusChunkFinder extends Module {
         // ENTITY SPAWN ANALYSIS (Items, mobs)
         if (detectItemClusters.get() && event.packet instanceof EntitySpawnS2CPacket packet) {
             if (packet.getEntityType() == EntityType.ITEM) {
-                // LƯU Ý: Cần khai báo hàm processItemSpawn
                 processItemSpawn(packet.getX(), packet.getY(), packet.getZ());
             }
             if (detectMobSpawners.get() && (
@@ -337,16 +335,13 @@ public class SusChunkFinder extends Module {
                 packet.getEntityType() == EntityType.CREEPER ||
                 packet.getEntityType() == EntityType.SPIDER
             )) {
-                // LƯU Ý: Cần khai báo hàm processMobSpawn
                 processMobSpawn(packet.getX(), packet.getY(), packet.getZ());
             }
         }
 
         // PLAYER MOVEMENT ANALYSIS (Flying detection)
         if (detectFlyingPlayers.get() && event.packet instanceof PlayerPositionLookS2CPacket packet) {
-            // Đã fix lỗi toạ độ của bản 1.21.4
-            net.minecraft.util.math.Vec3d pos = packet.change().position();
-            // LƯU Ý: Cần khai báo hàm processPlayerMovement
+            Vec3d pos = packet.change().position();
             processPlayerMovement(pos.x, pos.y, pos.z);
         }
     }
@@ -409,10 +404,292 @@ public class SusChunkFinder extends Module {
                     }
                 }
             }
-        } // ĐÓNG LỆNH IF (detectBeaconBlocks.get())
-    } // ĐÓNG HÀM processBlockUpdate()
+        }
 
-    // LƯU Ý ⚠️: NẾU TRONG FILE CŨ CỦA BẠN VẪN CÒN CÁC HÀM KHÁC NHƯ processItemSpawn(), 
-    // processPlayerMovement(), performDeepAnalysis()... THÌ BẠN HÃY DÁN NỐI TIẾP VÀO KHÚC NÀY NHÉ!
+        // Portal frame detection
+        if (detectPortalFrames.get() && state.getBlock() == Blocks.OBSIDIAN) {
+            data.obsidianCount.incrementAndGet();
+            if (data.obsidianCount.get() > 10) { // Full portal frame
+                suspiciousChunks.add(chunkPos);
+                if (!silentMode.get()) {
+                    ChatUtils.info("🔥 [Nether Portal] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+                }
+            }
+        }
 
-} // ĐÓNG CLASS SusChunkFinder
+        // Piston system detection
+        if (detectPistonSystems.get() && 
+            (state.getBlock() == Blocks.PISTON || state.getBlock() == Blocks.STICKY_PISTON ||
+             state.getBlock() == Blocks.SLIME_BLOCK || state.getBlock() == Blocks.HONEY_BLOCK)) {
+            data.pistonCount.incrementAndGet();
+            if (data.pistonCount.get() > 3) {
+                suspiciousChunks.add(chunkPos);
+                if (!silentMode.get()) {
+                    ChatUtils.info("⚙️ [Redstone System] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+                }
+            }
+        }
+
+        // Suspicious activity threshold
+        if (data.blockUpdateCount.get() > updateThreshold.get() && !suspiciousChunks.contains(chunkPos)) {
+            suspiciousChunks.add(chunkPos);
+            if (!silentMode.get()) {
+                ChatUtils.warning("⚠️ [Suspicious Activity] Chunk X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ() + 
+                                " (" + data.blockUpdateCount.get() + " updates)");
+            }
+        }
+    }
+
+    private void processItemSpawn(double x, double y, double z) {
+        ChunkPos chunkPos = new ChunkPos((int)x >> 4, (int)z >> 4);
+        ChunkData data = chunkDataMap.computeIfAbsent(chunkPos, k -> new ChunkData());
+        
+        data.itemEntityCount.incrementAndGet();
+        data.lastUpdated = System.currentTimeMillis();
+        
+        // Item cluster detection (farm output)
+        if (data.itemEntityCount.get() > 20) {
+            farmChunks.add(chunkPos);
+            if (!silentMode.get()) {
+                ChatUtils.info("📦 [Item Cluster] Farm output detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+            }
+        }
+    }
+
+    private void processMobSpawn(double x, double y, double z) {
+        ChunkPos chunkPos = new ChunkPos((int)x >> 4, (int)z >> 4);
+        ChunkData data = chunkDataMap.computeIfAbsent(chunkPos, k -> new ChunkData());
+        
+        // Mob spawner activity indicator
+        suspiciousChunks.add(chunkPos);
+        if (!silentMode.get()) {
+            ChatUtils.warning("👹 [Mob Spawner] Activity at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+        }
+    }
+
+    private void processPlayerMovement(double x, double y, double z) {
+        ChunkPos chunkPos = new ChunkPos((int)x >> 4, (int)z >> 4);
+        ChunkData data = chunkDataMap.computeIfAbsent(chunkPos, k -> new ChunkData());
+        
+        data.playerMovementCount.incrementAndGet();
+        
+        // Detect unnatural vertical movement (flying)
+        if (data.playerMovementCount.get() > 5) {
+            Vec3d currentPos = new Vec3d(x, y, z);
+            BlockPos blockBelow = new BlockPos((int)x, (int)y - 1, (int)z);
+            
+            if (!mc.world.getBlockState(blockBelow).isSolid() && 
+                !mc.world.getBlockState(blockBelow.down()).isSolid()) {
+                suspiciousChunks.add(chunkPos);
+                if (!silentMode.get()) {
+                    ChatUtils.warning("🚁 [Possible Fly] Player movement without blocks below at X:" + 
+                                    chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
+                }
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // DEEP ANALYSIS METHOD (KingMC Optimization)
+    private void performDeepAnalysis() {
+        if (chunkDataMap.isEmpty()) return;
+        
+        List<ChunkPos> toAnalyze = new ArrayList<>(chunkDataMap.keySet());
+        Collections.shuffle(toAnalyze);
+        
+        // Limit analysis to 10 chunks per cycle for performance
+        int limit = Math.min(10, toAnalyze.size());
+        
+        for (int i = 0; i < limit; i++) {
+            ChunkPos chunk = toAnalyze.get(i);
+            ChunkData data = chunkDataMap.get(chunk);
+            if (data == null) continue;
+            
+            // Multi-factor threat scoring system
+            int threatScore = 0;
+            
+            // Block update frequency
+            if (data.blockUpdateCount.get() > 50) threatScore += 3;
+            else if (data.blockUpdateCount.get() > 20) threatScore += 2;
+            else if (data.blockUpdateCount.get() > 10) threatScore += 1;
+            
+            // Farm detection
+            if (data.farmBlockCount.get() > 10) threatScore += 2;
+            
+            // Base detection
+            if (data.chestCount.get() > 5) threatScore += 2;
+            if (data.beaconBlockCount.get() > 2) threatScore += 3;
+            
+            // Underground activity
+            if (scanUnderground.get() && data.blockDistribution.size() > 8) {
+                threatScore += 2;
+                undergroundChunks.add(chunk);
+            }
+            
+            // Mark high-threat chunks
+            if (threatScore >= 5 && !suspiciousChunks.contains(chunk)) {
+                suspiciousChunks.add(chunk);
+                if (!silentMode.get()) {
+                    ChatUtils.warning("🔴 [High Threat] Chunk X:" + chunk.getStartX() + " Z:" + chunk.getStartZ() + 
+                                    " Score: " + threatScore);
+                }
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // WAYPOINT MARKING
+    private void markWaypoints() {
+        if (!autoMarkWaypoints.get() || mc.world == null) return;
+        
+        for (ChunkPos chunk : suspiciousChunks) {
+            String waypointName = "Suspicious_" + chunk.x + "_" + chunk.z;
+            double centerX = chunk.getStartX() + 8;
+            double centerZ = chunk.getStartZ() + 8;
+            
+            // Check if waypoint already exists
+            boolean exists = false;
+            if (mc.world != null) {
+                // Add waypoint creation logic here (depends on your waypoint system)
+                // Example: WaypointManager.add(new Waypoint(waypointName, centerX, renderHeight.get(), centerZ));
+            }
+            
+            if (!exists && !silentMode.get()) {
+                ChatUtils.info("📍 Marked waypoint: " + waypointName);
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // RENDER METHOD (Optimized for Elytra Flying)
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (mc.world == null || mc.player == null) return;
+        
+        renderSuspicious.set(suspiciousColor.get());
+        renderFarm.set(farmColor.get());
+        renderBase.set(baseColor.get());
+        
+        ChunkPos playerChunk = mc.player.getChunkPos();
+        int renderY = renderHeight.get();
+        
+        // Render only visible chunks for performance
+        for (ChunkPos chunk : suspiciousChunks) {
+            if (Math.abs(chunk.x - playerChunk.x) <= scanRange.get() && 
+                Math.abs(chunk.z - playerChunk.z) <= scanRange.get()) {
+                renderChunkBox(event, chunk, renderY, renderSuspicious, "SUSPICIOUS");
+            }
+        }
+        
+        for (ChunkPos chunk : farmChunks) {
+            if (Math.abs(chunk.x - playerChunk.x) <= scanRange.get() && 
+                Math.abs(chunk.z - playerChunk.z) <= scanRange.get()) {
+                renderChunkBox(event, chunk, renderY, renderFarm, "FARM");
+            }
+        }
+        
+        for (ChunkPos chunk : baseChunks) {
+            if (Math.abs(chunk.x - playerChunk.x) <= scanRange.get() && 
+                Math.abs(chunk.z - playerChunk.z) <= scanRange.get()) {
+                renderChunkBox(event, chunk, renderY, renderBase, "BASE");
+            }
+        }
+        
+        for (ChunkPos chunk : undergroundChunks) {
+            if (Math.abs(chunk.x - playerChunk.x) <= scanRange.get() && 
+                Math.abs(chunk.z - playerChunk.z) <= scanRange.get()) {
+                renderChunkBox(event, chunk, Math.max(renderY - 20, 10), renderUnderground, "UNDERGROUND");
+            }
+        }
+    }
+
+    private void renderChunkBox(Render3DEvent event, ChunkPos chunk, int y, Color color, String label) {
+        double x1 = chunk.getStartX();
+        double z1 = chunk.getStartZ();
+        double x2 = x1 + 16;
+        double z2 = z1 + 16;
+        
+        event.renderer.box(x1, y, z1, x2, y + 1, z2, color, color, ShapeMode.Lines, 0);
+        
+        if (renderLabels.get()) {
+            Vec3d center = new Vec3d(x1 + 8, y + 2, z1 + 8);
+            if (mc.gameRenderer.getCamera().getPos().distanceTo(center) < 100) {
+                event.renderer.text(label, center.x, center.y, center.z, true);
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // UTILITY METHODS FOR EXTERNAL ACCESS
+    public Set<ChunkPos> getSuspiciousChunks() {
+        return new HashSet<>(suspiciousChunks);
+    }
+    
+    public Set<ChunkPos> getFarmChunks() {
+        return new HashSet<>(farmChunks);
+    }
+    
+    public Set<ChunkPos> getBaseChunks() {
+        return new HashSet<>(baseChunks);
+    }
+    
+    public Set<ChunkPos> getUndergroundChunks() {
+        return new HashSet<>(undergroundChunks);
+    }
+    
+    public Map<ChunkPos, ChunkData> getChunkDataMap() {
+        return new HashMap<>(chunkDataMap);
+    }
+    
+    public void forceRescan() {
+        if (mc.player != null) {
+            performChunkScan(mc.player.getChunkPos());
+            ChatUtils.info("Force rescan complete. Scanned " + chunkDataMap.size() + " chunks.");
+        }
+    }
+    
+    public void clearAllData() {
+        chunkDataMap.clear();
+        suspiciousChunks.clear();
+        farmChunks.clear();
+        baseChunks.clear();
+        undergroundChunks.clear();
+        ChatUtils.info("All chunk data cleared.");
+    }
+    
+    // ──────────────────────────────────────────────────────────────
+    // PACKET SEND HANDLER FOR COMPLETE ANALYSIS
+    @EventHandler
+    private void onPacketSend(PacketEvent.Send event) {
+        if (!packetAnalysis.get()) return;
+        
+        // Analyze player actions for suspicious behavior
+        if (event.packet instanceof PlayerActionC2SPacket packet) {
+            if (packet.getAction() == PlayerActionC2SPacket.Action.START_DESTROY_BLOCK ||
+                packet.getAction() == PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK ||
+                packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
+                
+                ChunkPos chunk = new ChunkPos(packet.getPos());
+                ChunkData data = chunkDataMap.computeIfAbsent(chunk, k -> new ChunkData());
+                data.blockUpdateCount.addAndGet(2); // Mining activity adds weight
+            }
+        }
+        
+        // Analyze movement packets for fly detection
+        if (event.packet instanceof PlayerMoveC2SPacket packet) {
+            if (packet.changesPosition()) {
+                Vec3d pos = new Vec3d(packet.getX(mc.player.getX()), 
+                                     packet.getY(mc.player.getY()), 
+                                     packet.getZ(mc.player.getZ()));
+                processPlayerMovement(pos.x, pos.y, pos.z);
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // CONFIGURATION GETTERS FOR EXTERNAL MODULES
+    public int getScanRange() { return scanRange.get(); }
+    public boolean isSilentMode() { return silentMode.get(); }
+    public boolean isAutoScanEnabled() { return autoScanWhileFlying.get(); }
+    public int getUpdateThreshold() { return updateThreshold.get(); }
+}
