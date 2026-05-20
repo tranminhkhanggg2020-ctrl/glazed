@@ -377,7 +377,7 @@ public class SusChunkFinder extends Module {
         double x2 = x1 + 16;
         double z2 = z1 + 16;
         
-        event.renderer.box(x1, y, z1, x2, y + 1, z2, color, color, ShapeMode.Lines, 0);
+        event.renderer.box(x1, y, z1, x2, y + 1, z2, color, color, ShapeMode.Both, 0);
         
         // Đã tắt tính năng render text để tương thích với API Meteor bản mới
         // if (renderLabels.get()) {
