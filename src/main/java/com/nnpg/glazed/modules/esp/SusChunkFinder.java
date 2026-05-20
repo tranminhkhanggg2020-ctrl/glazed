@@ -403,4 +403,7 @@ public class SusChunkFinder extends Module {
                         ChatUtils.info("💎 [Beacon Base] Detected at X:" + chunkPos.getStartX() + " Z:" + chunkPos.getStartZ());
                     }
                 }
-            }
+            }         
+        }
+    }
+}
