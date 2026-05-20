@@ -258,7 +258,7 @@ processPlayerMovement(pos.x, pos.y, pos.z);
         // Farm block detection
         if (detectFarmBlocks.get()) {
             if (state.getBlock() == Blocks.BAMBOO || state.getBlock() == Blocks.KELP || 
-                state.getBlock() == Blocks.KELP_PLANT || state.getBlock() == Blocks.SUGARCANE ||
+                state.getBlock() == Blocks.KELP_PLANT || state.getBlock() == Blocks.SUGAR_CANE ||
                 state.getBlock() == Blocks.CACTUS) {
                 data.farmBlockCount.incrementAndGet();
                 if (data.farmBlockCount.get() > 15) {
