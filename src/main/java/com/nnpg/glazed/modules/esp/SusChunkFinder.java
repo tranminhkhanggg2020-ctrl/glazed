@@ -261,7 +261,8 @@ public class SusChunkFinder extends Module {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
                     var state = chunk.getBlockState(bp);
                     if (state.getBlock() == Blocks.DEEPSLATE) {
-                        var axis = state.get(PillarBlock.AXIS);
+                        // [FIX]: Gọi thẳng đường dẫn tuyệt đối của Properties.AXIS để không cần import
+                        var axis = state.get(net.minecraft.state.property.Properties.AXIS);
                         if (axis != net.minecraft.util.math.Direction.Axis.Y) {
                             count++;
                         }
