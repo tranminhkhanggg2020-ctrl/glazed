@@ -254,7 +254,7 @@ public class SusChunkFinder extends Module {
 
         // Auto-scan while flying Elytra
         if (autoScanWhileFlying.get() && mc.player != null) {
-            if (mc.player.isFallFlying()) { // Elytra flying
+            if (mc.player.isGliding()) { // Elytra flying
                 ChunkPos currentChunk = mc.player.getChunkPos();
                 if (lastPlayerChunk == null || !lastPlayerChunk.equals(currentChunk)) {
                     lastPlayerChunk = currentChunk;
