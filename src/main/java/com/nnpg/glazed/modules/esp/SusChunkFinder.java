@@ -17,7 +17,7 @@ import net.minecraft.world.chunk.WorldChunk;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 
-import com.nnpg.glazed.GlazedAddon; 
+import com.nnpg.glazed.GlazedAddon;
 
 public class SusChunkFinder extends Module {
 
@@ -41,7 +41,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Ngưỡng cảnh báo. NBT threshold = sensitivity × 10. Sus Score threshold = sensitivity.")
+            .description("Ngưỡng cảnh báo. NBT threshold = sensitivity * 10. Sus Score threshold = sensitivity.")
             .defaultValue(3).min(1).max(10).sliderRange(1, 10)
             .build()
     );
@@ -127,10 +127,10 @@ public class SusChunkFinder extends Module {
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        if (event.packet instanceof ChunkDataS2CPacket packet) {
-            handleChunkData(packet);
-        } else if (event.packet instanceof BlockUpdateS2CPacket packet) {
-            handleBlockUpdate(packet);
+        if (event.packet instanceof ChunkDataS2CPacket) {
+            handleChunkData((ChunkDataS2CPacket) event.packet);
+        } else if (event.packet instanceof BlockUpdateS2CPacket) {
+            handleBlockUpdate((BlockUpdateS2CPacket) event.packet);
         }
     }
 
