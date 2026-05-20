@@ -6,7 +6,6 @@ import com.nnpg.glazed.modules.pvp.*;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.Category;
-import meteordevelopment.meteorclient.systems.commands.Commands;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
@@ -100,8 +99,6 @@ public class GlazedAddon extends MeteorAddon {
         Modules.get().add(new ShieldBreaker());
         Modules.get().add(new InvisESP());
         Modules.get().add(new AutoTotemOrder());
-        Modules.get().add(new ChunkSyncExploit());
-        Commands.get().add(new ChunkSyncCommand());
         Modules.get().add(new LightESP());
         Modules.get().add(new PremiumTunnelBaseFinder());
         Modules.get().add(new AdminList());
