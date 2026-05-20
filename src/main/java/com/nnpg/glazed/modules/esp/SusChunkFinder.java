@@ -242,7 +242,8 @@ public class SusChunkFinder extends Module {
 
         // PLAYER MOVEMENT ANALYSIS (Flying detection)
         if (detectFlyingPlayers.get() && event.packet instanceof PlayerPositionLookS2CPacket packet) {
-            processPlayerMovement(packet.getX(), packet.getY(), packet.getZ());
+            processPlayerMovement(// Thay vì dùng packet.getX(), packet.getY(), packet.getZ()
+processPlayerMovement(packet.change().position().x, packet.change().position().y, packet.change().position().z);
         }
     }
 
