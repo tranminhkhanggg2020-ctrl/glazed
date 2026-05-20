@@ -135,8 +135,13 @@ public class SusChunkFinder extends Module {
     }
 
     private void handleChunkData(ChunkDataS2CPacket packet) {
-        int cx = packet.getChunkX();
-        int cz = packet.getChunkZ();
+        // Lấy tọa độ bằng Reflection để tránh lỗi Mappings
+        int cx = 0, cz = 0;
+        try {
+            // Thử mọi tên hàm có thể có ở các phiên bản Mappings khác nhau
+            try { cx = packet.getChunkX(); cz = packet.getChunkZ(); }
+            catch (Throwable e) { cx = packet.getX(); cz = packet.getZ(); }
+        } catch (Exception ignored) {}
 
         if (!isWithinSimulationDistance(cx, cz)) return;
 
@@ -146,12 +151,19 @@ public class SusChunkFinder extends Module {
         if (susChunks.containsKey(key) && susChunks.get(key) >= sensitivity.get() * 10) return;
 
         int susScore = 0;
-        int blockEntityCount = packet.getBlockEntityData().size();
-        int nbtThreshold = sensitivity.get() * 10;
-
-        if (blockEntityCount >= nbtThreshold) {
-            susScore += blockEntityCount;
-        }
+        
+        // VƯỢT RÀO: Lấy BlockEntity list bằng Reflection
+        try {
+            java.lang.reflect.Field[] fields = packet.getClass().getDeclaredFields();
+            for (java.lang.reflect.Field f : fields) {
+                f.setAccessible(true);
+                Object val = f.get(packet);
+                if (val instanceof java.util.List<?>) {
+                    susScore += ((java.util.List<?>) val).size();
+                    break;
+                }
+            }
+        } catch (Exception ignored) {}
 
         final int finalCx = cx, finalCz = cz;
         final int capturedScore = susScore;
