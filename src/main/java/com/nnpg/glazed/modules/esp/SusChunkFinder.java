@@ -48,7 +48,7 @@ public class SusChunkFinder extends Module {
             .build()
     );
 
-    // --- AFK Filters (Đã đổi tên gọn gàng) ---
+    // --- AFK Filters ---
     private final Setting<Boolean> filterKelp = sgHeuristic.add(
         new BoolSetting.Builder()
             .name("kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa (age=25).")
@@ -121,7 +121,7 @@ public class SusChunkFinder extends Module {
             }
         } catch (Exception ignored) {}
 
-        // Nếu số lượng rương vượt ngưỡng Sensitivity -> Đánh dấu ngay
+        // Báo động nếu số Rương vượt ngưỡng Sensitivity
         if (blockEntityCount >= sensitivity.get()) {
             renderCache.put(key, new int[]{ cx * 16, cz * 16 });
             return;
@@ -168,9 +168,10 @@ public class SusChunkFinder extends Module {
                     if (stateStr.contains("minecraft:deepslate") && stateStr.contains("axis=") && !stateStr.contains("axis=y")) {
                         susScore += 2; 
                     }
-                    // 2. Dấu vết sinh tồn ngầm (Đuốc, Bàn chế tạo, Giường, Ván gỗ...)
-                    if (stateStr.contains("torch") || stateStr.contains("lantern") || stateStr.contains("crafting_table") || stateStr.contains("planks") || stateStr.contains("bed")) {
-                        susScore += 5; // Cực kỳ khả nghi
+                    
+                    // 2. DẤU VẾT ĐỘC QUYỀN CỦA NGƯỜI CHƠI (Đã loại bỏ Planks, Torch và Lantern để không dính Khu mỏ/Thành phố cổ)
+                    if (stateStr.contains("crafting_table") || stateStr.contains("ender_chest") || stateStr.contains("enchanting_table") || stateStr.contains("anvil") || stateStr.contains("bed") || stateStr.contains("furnace")) {
+                        susScore += 15; // Thấy 1 trong các khối này ở dưới hang đá thì 1000% là Base! Báo đỏ ngay lập tức.
                     }
 
                     // ==========================================
@@ -190,7 +191,7 @@ public class SusChunkFinder extends Module {
                         vineCount++;
                     }
                     if (filterBeeNest.get() && stateStr.contains("minecraft:bee_nest")) {
-                        susScore += 10; // Chắc chắn có trại ong ngầm
+                        susScore += 15; // Chắc chắn có trại ong ngầm
                     }
                 }
             }
