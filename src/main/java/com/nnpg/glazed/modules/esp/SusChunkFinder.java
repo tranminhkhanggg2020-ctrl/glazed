@@ -79,7 +79,7 @@ public class SusChunkFinder extends Module {
     private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Base Finder: Quét Rương, Dấu vết con người đào bới và AFK.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Base Finder: Quét Rương, Dấu vết con người và AFK.");
     }
 
     @Override
@@ -169,9 +169,10 @@ public class SusChunkFinder extends Module {
                         susScore += 2; 
                     }
                     
-                    // 2. DẤU VẾT ĐỘC QUYỀN CỦA NGƯỜI CHƠI (Đã loại bỏ Planks, Torch và Lantern để không dính Khu mỏ/Thành phố cổ)
-                    if (stateStr.contains("crafting_table") || stateStr.contains("ender_chest") || stateStr.contains("enchanting_table") || stateStr.contains("anvil") || stateStr.contains("bed") || stateStr.contains("furnace")) {
-                        susScore += 15; // Thấy 1 trong các khối này ở dưới hang đá thì 1000% là Base! Báo đỏ ngay lập tức.
+                    // 2. DẤU VẾT ĐỘC QUYỀN (Đã FIX BẪY BEDROCK)
+                    // Dùng "_bed" thay vì "bed" để không dính "bedrock"
+                    if (stateStr.contains("crafting_table") || stateStr.contains("ender_chest") || stateStr.contains("enchanting_table") || stateStr.contains("anvil") || stateStr.contains("_bed") || stateStr.contains("furnace")) {
+                        susScore += 15; 
                     }
 
                     // ==========================================
@@ -187,11 +188,12 @@ public class SusChunkFinder extends Module {
                     if (filterAmethyst.get() && stateStr.contains("minecraft:amethyst_cluster")) {
                         susScore += 1;
                     }
-                    if (filterVines.get() && stateStr.contains("minecraft:vine")) {
+                    // Đã FIX BẪY VINE (Loại bỏ cave_vines khỏi đếm vine thường)
+                    if (filterVines.get() && stateStr.contains("minecraft:vine") && !stateStr.contains("cave_vines")) {
                         vineCount++;
                     }
                     if (filterBeeNest.get() && stateStr.contains("minecraft:bee_nest")) {
-                        susScore += 15; // Chắc chắn có trại ong ngầm
+                        susScore += 15; 
                     }
                 }
             }
