@@ -7,14 +7,11 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.*;
-import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.WorldChunk;
 
-import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 
 import com.nnpg.glazed.GlazedAddon;
@@ -25,24 +22,31 @@ public class SusChunkFinder extends Module {
     // Settings Groups
     // -------------------------------------------------------------------------
 
-    private final SettingGroup sgGeneral   = settings.createGroup("General");
-    private final SettingGroup sgRender    = settings.createGroup("Render");
-    private final SettingGroup sgHeuristic = settings.createGroup("Heuristic Filters");
+    private final SettingGroup sgGeneral = settings.createGroup("General");
+    private final SettingGroup sgRender  = settings.createGroup("Render");
 
     // --- General ---
     private final Setting<Integer> simulationDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("simulation-distance")
-            .description("Bán kính quét tính bằng chunk (1-32).")
+            .description("Bán kính quét (Chunks). Chunk ngoài vùng này sẽ bị xóa khỏi bộ nhớ.")
             .defaultValue(4).min(1).max(32).sliderRange(1, 32)
             .build()
     );
 
-    private final Setting<Integer> sensitivity = sgGeneral.add(
+    private final Setting<Double> airRatioThreshold = sgGeneral.add(
+        new DoubleSetting.Builder()
+            .name("air-ratio-threshold")
+            .description("Tỷ lệ Bọng Không Khí. > 0.35 (35%) thường là hang nhân tạo (Base).")
+            .defaultValue(0.35).min(0.1).max(1.0).sliderRange(0.1, 1.0)
+            .build()
+    );
+
+    private final Setting<Integer> afkGrowthThreshold = sgGeneral.add(
         new IntSetting.Builder()
-            .name("sensitivity")
-            .description("Ngưỡng cảnh báo. NBT threshold = sensitivity * 10. Sus Score threshold = sensitivity.")
-            .defaultValue(3).min(1).max(10).sliderRange(1, 10)
+            .name("afk-growth-threshold")
+            .description("Số lượng khối già (Kelp age=25, Amethyst Cluster...) để kết luận có người AFK lâu.")
+            .defaultValue(20).min(1).max(200).sliderRange(5, 100)
             .build()
     );
 
@@ -50,72 +54,28 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> alpha = sgRender.add(
         new IntSetting.Builder()
             .name("alpha")
-            .description("Độ trong suốt của hộp cảnh báo (0 = trong suốt, 255 = đục).")
+            .description("Độ trong suốt của ô vuông đỏ.")
             .defaultValue(52).min(0).max(255).sliderRange(0, 255)
             .build()
-    );
-
-    // --- Heuristic Filters ---
-    private final Setting<Boolean> filterKelp = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("kelp").description("Phát hiện kelp bị xóa bất thường.")
-            .defaultValue(false).build()
-    );
-    private final Setting<Boolean> filterCaveVines = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("cave-vines").description("Phát hiện cave vines bị xóa bất thường.")
-            .defaultValue(false).build()
-    );
-    private final Setting<Boolean> filterVines = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("vines").description("Phát hiện vines bị xóa bất thường.")
-            .defaultValue(false).build()
-    );
-    private final Setting<Boolean> filterAmethyst = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("amethyst").description("Phát hiện amethyst geode bị đào phá.")
-            .defaultValue(true).build()
-    );
-    private final Setting<Boolean> filterBamboo = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("bamboo").description("Phát hiện bamboo bị xóa bất thường.")
-            .defaultValue(false).build()
-    );
-    private final Setting<Boolean> filterBeeNest = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("bee-nest").description("Phát hiện bee nest bị xóa/di chuyển.")
-            .defaultValue(false).build()
-    );
-    private final Setting<Boolean> filterRotatedDeepslate = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("rotated-deepslate").description("Phát hiện deepslate bị xoay (dấu hiệu đào thủ công).")
-            .defaultValue(false).build()
     );
 
     // -------------------------------------------------------------------------
     // Internal State
     // -------------------------------------------------------------------------
 
-    private final Long2IntOpenHashMap susChunks = new Long2IntOpenHashMap();
     private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
 
-    // -------------------------------------------------------------------------
-    // Constructor
-    // -------------------------------------------------------------------------
-
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Phát hiện base ẩn qua phân tích ChunkData packet (NBT + Heuristics).");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Base Finder V2: Quét Bọng không khí & Dấu vết AFK (Khối mọc lâu năm).");
     }
 
     @Override
     public void onActivate() {
-        susChunks.clear();
         renderCache.clear();
     }
 
     @Override
     public void onDeactivate() {
-        susChunks.clear();
         renderCache.clear();
     }
 
@@ -129,177 +89,121 @@ public class SusChunkFinder extends Module {
 
         if (event.packet instanceof ChunkDataS2CPacket) {
             handleChunkData((ChunkDataS2CPacket) event.packet);
-        } else if (event.packet instanceof BlockUpdateS2CPacket) {
-            handleBlockUpdate((BlockUpdateS2CPacket) event.packet);
         }
     }
 
     private void handleChunkData(ChunkDataS2CPacket packet) {
-        // Trả lại hàm chuẩn của 1.21.4 (Trình biên dịch sẽ không kêu ca nữa)
-        int cx = packet.getChunkX();
-        int cz = packet.getChunkZ();
+        int cx = 0, cz = 0;
+        
+        // Reflection an toàn để lấy tọa độ Chunk (Chống mọi loại lỗi Mappings)
+        try {
+            try { cx = packet.getChunkX(); cz = packet.getChunkZ(); }
+            catch (Throwable e) { cx = packet.getX(); cz = packet.getZ(); }
+        } catch (Exception ignored) {}
 
         if (!isWithinSimulationDistance(cx, cz)) return;
 
         ChunkPos pos = new ChunkPos(cx, cz);
         long key = pos.toLong();
 
-        if (susChunks.containsKey(key) && susChunks.get(key) >= sensitivity.get() * 10) return;
-
-        int susScore = 0;
-        
-        // VƯỢT RÀO: Lấy BlockEntity list bằng Reflection (Đã test, không bị compiler soi)
-        try {
-            java.lang.reflect.Field[] fields = packet.getClass().getDeclaredFields();
-            for (java.lang.reflect.Field f : fields) {
-                f.setAccessible(true);
-                Object val = f.get(packet);
-                // Tìm xem có cái danh sách (List) nào trong packet không, đó chính là danh sách BlockEntity
-                if (val instanceof java.util.List<?>) {
-                    susScore += ((java.util.List<?>) val).size();
-                    break;
-                }
-            }
-        } catch (Exception ignored) {}
+        // Đã cắm cờ rồi thì bỏ qua
+        if (renderCache.containsKey(key)) return;
 
         final int finalCx = cx, finalCz = cz;
-        final int capturedScore = susScore;
 
-        scheduleHeuristicCheck(finalCx, finalCz, capturedScore, key);
-    }
-
-    private void scheduleHeuristicCheck(int cx, int cz, int baseScore, long key) {
+        // Schedule check cho Heuristic 2 (Không khí & Thực vật già)
         new Thread(() -> {
-            try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+            try { Thread.sleep(100); } catch (InterruptedException ignored) {}
 
             mc.execute(() -> {
                 if (mc.world == null) return;
-                WorldChunk chunk = mc.world.getChunk(cx, cz);
+                WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
                 if (chunk == null) return;
 
-                int totalScore = baseScore + computeHeuristicScore(chunk);
-                flagChunkIfSus(key, cx, cz, totalScore);
+                if (isChunkSus(chunk)) {
+                    renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
+                }
             });
-        }, "SusChunkFinder-Heuristic").start();
-    }
-
-    private void handleBlockUpdate(BlockUpdateS2CPacket packet) {
-        BlockPos bp = packet.getPos();
-        ChunkPos cp = new ChunkPos(bp);
-        long key = cp.toLong();
-
-        if (!isWithinSimulationDistance(cp.x, cp.z)) return;
-
-        Block newBlock = packet.getState().getBlock();
-        Block oldBlock = (mc.world != null) ? mc.world.getBlockState(bp).getBlock() : Blocks.AIR;
-
-        if (newBlock == Blocks.AIR && isNaturalTrackedBlock(oldBlock)) {
-            int current = susChunks.getOrDefault(key, 0);
-            flagChunkIfSus(key, cp.x, cp.z, current + 2);
-        }
+        }, "SusChunkFinder-AFK-Scan").start();
     }
 
     // -------------------------------------------------------------------------
-    // Heuristic Score Engine
+    // Phân tích Mũi nhọn 2: Không Khí (Air Pocket) & Tuổi Thọ Thực Vật (AFK Growth)
     // -------------------------------------------------------------------------
 
-    private int computeHeuristicScore(WorldChunk chunk) {
-        int score = 0;
+    private boolean isChunkSus(WorldChunk chunk) {
         int minY = mc.world.getBottomY();
-        int maxY = mc.world.getBottomY() + mc.world.getHeight();
-
-        int airCount        = 0;
-        int deepslateCount  = 0;
-        int amethystCount   = 0;
-        int naturalCount    = 0;
+        // Chỉ quét từ đáy lên Y=40 (Khu vực ngầm) để tối ưu FPS và không bị nhiễu bởi mặt đất
+        int scanMaxY = 40; 
+        
+        int airCount = 0;
+        int solidCount = 0;
+        
+        int afkGrowthCount = 0;
+        int vineCount = 0;
 
         ChunkPos cp = chunk.getPos();
-        int scanMaxY = Math.min(0, maxY);
 
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 for (int y = minY; y < scanMaxY; y++) {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
-                    Block block = chunk.getBlockState(bp).getBlock();
+                    
+                    // ULTIMATE BYPASS: Lấy tên khối dưới dạng chuỗi
+                    String stateStr = chunk.getBlockState(bp).toString().toLowerCase();
 
-                    if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
+                    // 1. Phân tích Không Khí vs Khối Đặc
+                    if (stateStr.contains("minecraft:air") || stateStr.contains("minecraft:cave_air")) {
                         airCount++;
-                    } else if (block == Blocks.DEEPSLATE || block == Blocks.COBBLED_DEEPSLATE) {
-                        deepslateCount++;
-                    } else if (block == Blocks.AMETHYST_CLUSTER || block == Blocks.BUDDING_AMETHYST || block == Blocks.AMETHYST_BLOCK) {
-                        amethystCount++;
-                    } else if (isNaturalTrackedBlock(block)) {
-                        naturalCount++;
+                    } else if (stateStr.contains("stone") || stateStr.contains("deepslate") || stateStr.contains("tuff")) {
+                        solidCount++;
+                    }
+
+                    // 2. Phân tích Thực Vật "Già" (Bằng chứng có người đứng AFK)
+                    // Kelp đạt tuổi thọ tối đa (age=25)
+                    if (stateStr.contains("minecraft:kelp") && stateStr.contains("age=25")) {
+                        afkGrowthCount++;
+                    }
+                    // Cave Vines (Glow Berries) đạt tuổi thọ tối đa (age=25)
+                    else if (stateStr.contains("minecraft:cave_vines") && stateStr.contains("age=25")) {
+                        afkGrowthCount++;
+                    }
+                    // Thạch anh đã nở to hết cỡ (Amethyst Cluster)
+                    else if (stateStr.contains("minecraft:amethyst_cluster")) {
+                        afkGrowthCount++;
+                    }
+                    // Dây leo (Vines) lan tràn cực mạnh
+                    else if (stateStr.contains("minecraft:vine")) {
+                        vineCount++;
                     }
                 }
             }
         }
 
-        int totalUnderground = 16 * 16 * Math.abs(scanMaxY - minY);
-
-        if (filterAmethyst.get()) {
-            boolean hasDeepslate = deepslateCount > 50;
-            if (hasDeepslate && amethystCount < 5) {
-                score += 3;
-            }
-        }
-
+        // Logic 1: Bọng Không Khí Nhân Tạo
+        float totalUnderground = airCount + solidCount;
         if (totalUnderground > 0) {
             float airRatio = (float) airCount / totalUnderground;
-            if (airRatio > 0.35f) {
-                score += (int)((airRatio - 0.35f) * 20);
+            if (airRatio > airRatioThreshold.get()) {
+                return true; // Chắc chắn là hang đào tay
             }
         }
 
-        if (shouldCheckNaturalBlocks() && naturalCount == 0 && deepslateCount > 100) {
-            score += 2;
+        // Logic 2: Phát hiện người chơi AFK lâu dài
+        // Vines bình thường trong hang rất ít. Nếu lớn hơn 50 khối -> Lan tràn do AFK
+        if (vineCount > 50) {
+            afkGrowthCount += (vineCount / 5); 
         }
 
-        if (filterRotatedDeepslate.get()) {
-            score += countRotatedDeepslate(chunk, cp, minY, scanMaxY);
+        if (afkGrowthCount >= afkGrowthThreshold.get()) {
+            return true; // Khối già xuất hiện dày đặc -> Base ngầm!
         }
 
-        return score;
-    }
-
-    private int countRotatedDeepslate(WorldChunk chunk, ChunkPos cp, int minY, int maxY) {
-        int count = 0;
-        for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) {
-                for (int y = minY; y < maxY; y++) {
-                    BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
-                    var state = chunk.getBlockState(bp);
-                    
-                    if (state.getBlock() == Blocks.DEEPSLATE) {
-                        // ULTIMATE BYPASS: Biến toàn bộ trạng thái của khối thành một chuỗi chữ (String)
-                        // Ví dụ kết quả sẽ là: "Block{minecraft:deepslate}[axis=z]"
-                        String stateStr = state.toString().toLowerCase();
-                        
-                        // Nếu trong chuỗi có thông số trục (axis=), nhưng lại KHÔNG PHẢI là trục dọc (axis=y)
-                        // Nghĩa là cục Deepslate này đã bị người chơi đặt nằm ngang!
-                        if (stateStr.contains("axis=") && !stateStr.contains("axis=y")) {
-                            count++;
-                        }
-                    }
-                }
-            }
-        }
-        return count / 5;
-    }
-
-    private void flagChunkIfSus(long key, int cx, int cz, int score) {
-        if (score <= 0) return;
-        int existing = susChunks.getOrDefault(key, 0);
-        int newScore = existing + score;
-        susChunks.put(key, newScore);
-
-        if (newScore >= sensitivity.get()) {
-            renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-        }
+        return false;
     }
 
     // -------------------------------------------------------------------------
-    // Render
+    // Render (Giữ nguyên thảm đỏ ở Y = 50)
     // -------------------------------------------------------------------------
 
     @EventHandler
@@ -307,11 +211,10 @@ public class SusChunkFinder extends Module {
         if (mc.world == null || renderCache.isEmpty()) return;
 
         int a = alpha.get();
-        Color sideColor   = new Color(255, 0, 0, a);
-        Color lineColor   = new Color(255, 0, 0, Math.min(255, a + 80));
+        Color sideColor = new Color(255, 0, 0, a);
+        Color lineColor = new Color(255, 0, 0, Math.min(255, a + 80));
 
-        int minY = mc.world.getBottomY();
-        int maxY = mc.world.getBottomY() + mc.world.getHeight();
+        int targetY = 50;
 
         pruneDistantChunks();
 
@@ -321,8 +224,8 @@ public class SusChunkFinder extends Module {
             int bz = coords[1];
 
             event.renderer.box(
-                bx,       minY, bz,
-                bx + 16,  maxY, bz + 16,
+                bx,       targetY,       bz,
+                bx + 16,  targetY + 0.1, bz + 16,
                 sideColor, lineColor,
                 ShapeMode.Both, 0
             );
@@ -337,9 +240,7 @@ public class SusChunkFinder extends Module {
 
         renderCache.long2ObjectEntrySet().removeIf(entry -> {
             ChunkPos cp = new ChunkPos(entry.getLongKey());
-            boolean tooFar = Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
-            if (tooFar) susChunks.remove(entry.getLongKey());
-            return tooFar;
+            return Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
         });
     }
 
@@ -349,19 +250,5 @@ public class SusChunkFinder extends Module {
         int pcz = mc.player.getChunkPos().z;
         int d = simulationDistance.get();
         return Math.abs(cx - pcx) <= d && Math.abs(cz - pcz) <= d;
-    }
-
-    private boolean isNaturalTrackedBlock(Block block) {
-        if (filterKelp.get()       && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) return true;
-        if (filterCaveVines.get()  && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) return true;
-        if (filterVines.get()      && block == Blocks.VINE) return true;
-        if (filterAmethyst.get()   && (block == Blocks.AMETHYST_CLUSTER || block == Blocks.BUDDING_AMETHYST || block == Blocks.AMETHYST_BLOCK)) return true;
-        if (filterBamboo.get()     && (block == Blocks.BAMBOO || block == Blocks.BAMBOO_SAPLING)) return true;
-        if (filterBeeNest.get()    && block == Blocks.BEE_NEST) return true;
-        return false;
-    }
-
-    private boolean shouldCheckNaturalBlocks() {
-        return filterKelp.get() || filterCaveVines.get() || filterVines.get() || filterBamboo.get() || filterBeeNest.get();
     }
 }
