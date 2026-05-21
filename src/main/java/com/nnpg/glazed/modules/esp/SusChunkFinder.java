@@ -20,7 +20,7 @@ public class SusChunkFinder extends Module {
 
     private final SettingGroup sgGeneral   = settings.createGroup("General");
     private final SettingGroup sgRender    = settings.createGroup("Render");
-    private final SettingGroup sgHeuristic = settings.createGroup("AFK Filters"); // Đổi tên cho đúng bản chất
+    private final SettingGroup sgHeuristic = settings.createGroup("AFK Filters");
 
     // --- General ---
     private final Setting<Integer> simulationDistance = sgGeneral.add(
@@ -31,11 +31,11 @@ public class SusChunkFinder extends Module {
             .build()
     );
 
-    private final Setting<Integer> nbtThreshold = sgGeneral.add(
+    private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
-            .name("nbt-threshold")
-            .description("Số lượng Rương/Lò nung tối thiểu để báo Base. (Bắt sống Anti-Xray)")
-            .defaultValue(20).min(1).max(100).sliderRange(10, 100)
+            .name("sensitivity")
+            .description("Mức độ nhạy (Dựa trên số Rương hoặc Điểm nghi ngờ).")
+            .defaultValue(10).min(1).max(20).sliderRange(1, 20)
             .build()
     );
 
@@ -48,30 +48,30 @@ public class SusChunkFinder extends Module {
             .build()
     );
 
-    // --- AFK Filters (Chỉ bắt dấu vết AFK của người chơi) ---
+    // --- AFK Filters (Đã đổi tên gọn gàng) ---
     private final Setting<Boolean> filterKelp = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("afk-kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa (age=25).")
+            .name("kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa (age=25).")
             .defaultValue(true).build()
     );
     private final Setting<Boolean> filterCaveVines = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("afk-cave-vines").description("Quét Dây leo hang đạt tuổi thọ tối đa (age=25).")
+            .name("cave-vines").description("Quét Dây leo hang đạt tuổi thọ tối đa (age=25).")
             .defaultValue(true).build()
     );
     private final Setting<Boolean> filterAmethyst = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("afk-amethyst").description("Quét sự phát triển bất thường của cụm Thạch anh.")
-            .defaultValue(false).build() // Tắt mặc định vì dễ nhầm với thạch anh tự nhiên
+            .name("amethyst").description("Quét sự phát triển của cụm Thạch anh.")
+            .defaultValue(false).build()
     );
     private final Setting<Boolean> filterVines = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("afk-vines").description("Quét sự lan tràn bất thường của Dây leo (>50 khối).")
+            .name("vines").description("Quét sự lan tràn bất thường của Dây leo (>50 khối).")
             .defaultValue(true).build()
     );
     private final Setting<Boolean> filterBeeNest = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("underground-bee-nest").description("Báo động ngay nếu có Tổ ong dưới lòng đất (Y<40).")
+            .name("bee-nest").description("Báo động ngay nếu có Tổ ong dưới lòng đất.")
             .defaultValue(true).build()
     );
 
@@ -79,7 +79,7 @@ public class SusChunkFinder extends Module {
     private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Base Finder (No False Positives): Chỉ quét Rương và Dấu vết AFK.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Base Finder: Quét Rương, Dấu vết con người đào bới và AFK.");
     }
 
     @Override
@@ -107,7 +107,7 @@ public class SusChunkFinder extends Module {
 
         if (renderCache.containsKey(key)) return;
 
-        // BƯỚC 1: Quét Rương/NBT (Chính xác 100%, không bao giờ sai)
+        // BƯỚC 1: Quét Rương/NBT (Chính xác tuyệt đối)
         int blockEntityCount = 0;
         try {
             java.lang.reflect.Field[] fields = packet.getClass().getDeclaredFields();
@@ -121,12 +121,13 @@ public class SusChunkFinder extends Module {
             }
         } catch (Exception ignored) {}
 
-        if (blockEntityCount >= nbtThreshold.get()) {
+        // Nếu số lượng rương vượt ngưỡng Sensitivity -> Đánh dấu ngay
+        if (blockEntityCount >= sensitivity.get()) {
             renderCache.put(key, new int[]{ cx * 16, cz * 16 });
             return;
         }
 
-        // BƯỚC 2: Quét Dấu vết AFK (Nếu NBT bị giấu, tìm cây già)
+        // BƯỚC 2: Quét Dấu vết con người & Thực vật AFK
         final int finalCx = cx, finalCz = cz;
         new Thread(() -> {
             try { Thread.sleep(100); } catch (InterruptedException ignored) {}
@@ -136,19 +137,19 @@ public class SusChunkFinder extends Module {
                 WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
                 if (chunk == null) return;
 
-                if (isAfkGrowthDetected(chunk)) {
+                if (computeSusScore(chunk) >= sensitivity.get()) {
                     renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
                 }
             });
-        }, "SusChunkFinder-AFK-Scan").start();
+        }, "SusChunkFinder-Deep-Scan").start();
     }
 
-    // --- Thuật toán lọc AFK (Đã xóa bỏ hoàn toàn việc quét Không Khí/Air) ---
-    private boolean isAfkGrowthDetected(WorldChunk chunk) {
+    // --- Thuật toán quét Lõi ---
+    private int computeSusScore(WorldChunk chunk) {
         int minY = mc.world.getBottomY();
-        int scanMaxY = 40; // Chỉ quét ngầm
+        int scanMaxY = 40; // Chỉ quét ngầm để tránh mặt đất
         
-        int afkScore = 0;
+        int susScore = 0;
         int vineCount = 0;
 
         ChunkPos cp = chunk.getPos();
@@ -159,36 +160,47 @@ public class SusChunkFinder extends Module {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
                     String stateStr = chunk.getBlockState(bp).toString().toLowerCase();
 
-                    // Tảo bẹ già (Chỉ mọc tới age=25 khi có người AFK)
+                    // ==========================================
+                    // TÍNH NĂNG BẮT BUỘC: DẤU VẾT NGƯỜI CHƠI
+                    // ==========================================
+                    
+                    // 1. Khối đặt sai hướng (Rotated Deepslate)
+                    if (stateStr.contains("minecraft:deepslate") && stateStr.contains("axis=") && !stateStr.contains("axis=y")) {
+                        susScore += 2; 
+                    }
+                    // 2. Dấu vết sinh tồn ngầm (Đuốc, Bàn chế tạo, Giường, Ván gỗ...)
+                    if (stateStr.contains("torch") || stateStr.contains("lantern") || stateStr.contains("crafting_table") || stateStr.contains("planks") || stateStr.contains("bed")) {
+                        susScore += 5; // Cực kỳ khả nghi
+                    }
+
+                    // ==========================================
+                    // CÁC BỘ LỌC TÙY CHỌN (AFK GROWTH)
+                    // ==========================================
+                    
                     if (filterKelp.get() && stateStr.contains("minecraft:kelp") && stateStr.contains("age=25")) {
-                        afkScore += 5; 
+                        susScore += 3; 
                     }
-                    // Dây leo hang già
                     if (filterCaveVines.get() && stateStr.contains("minecraft:cave_vines") && stateStr.contains("age=25")) {
-                        afkScore += 5;
+                        susScore += 3;
                     }
-                    // Thạch anh nở rộ
                     if (filterAmethyst.get() && stateStr.contains("minecraft:amethyst_cluster")) {
-                        afkScore += 1;
+                        susScore += 1;
                     }
-                    // Dây leo thường
                     if (filterVines.get() && stateStr.contains("minecraft:vine")) {
                         vineCount++;
                     }
-                    // Tổ ong dưới lòng đất (Chắc chắn là trang trại nhân tạo)
                     if (filterBeeNest.get() && stateStr.contains("minecraft:bee_nest")) {
-                        return true; // Báo động khẩn cấp!
+                        susScore += 10; // Chắc chắn có trại ong ngầm
                     }
                 }
             }
         }
 
         if (filterVines.get() && vineCount > 50) {
-            afkScore += 10; // Dây leo lan tràn quá mức tự nhiên
+            susScore += 5; // Dây leo lan quá mức
         }
 
-        // Cần ít nhất 10 điểm (ví dụ: 2 khối Kelp già, hoặc rất nhiều dây leo) mới báo Base
-        return afkScore >= 10;
+        return susScore;
     }
 
     @EventHandler
