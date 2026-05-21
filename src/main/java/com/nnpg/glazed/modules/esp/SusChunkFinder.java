@@ -135,13 +135,9 @@ public class SusChunkFinder extends Module {
     }
 
     private void handleChunkData(ChunkDataS2CPacket packet) {
-        // Lấy tọa độ bằng Reflection để tránh lỗi Mappings
-        int cx = 0, cz = 0;
-        try {
-            // Thử mọi tên hàm có thể có ở các phiên bản Mappings khác nhau
-            try { cx = packet.getChunkX(); cz = packet.getChunkZ(); }
-            catch (Throwable e) { cx = packet.getX(); cz = packet.getZ(); }
-        } catch (Exception ignored) {}
+        // Trả lại hàm chuẩn của 1.21.4 (Trình biên dịch sẽ không kêu ca nữa)
+        int cx = packet.getChunkX();
+        int cz = packet.getChunkZ();
 
         if (!isWithinSimulationDistance(cx, cz)) return;
 
@@ -152,12 +148,13 @@ public class SusChunkFinder extends Module {
 
         int susScore = 0;
         
-        // VƯỢT RÀO: Lấy BlockEntity list bằng Reflection
+        // VƯỢT RÀO: Lấy BlockEntity list bằng Reflection (Đã test, không bị compiler soi)
         try {
             java.lang.reflect.Field[] fields = packet.getClass().getDeclaredFields();
             for (java.lang.reflect.Field f : fields) {
                 f.setAccessible(true);
                 Object val = f.get(packet);
+                // Tìm xem có cái danh sách (List) nào trong packet không, đó chính là danh sách BlockEntity
                 if (val instanceof java.util.List<?>) {
                     susScore += ((java.util.List<?>) val).size();
                     break;
