@@ -93,13 +93,9 @@ public class SusChunkFinder extends Module {
     }
 
     private void handleChunkData(ChunkDataS2CPacket packet) {
-        int cx = 0, cz = 0;
-        
-        // Reflection an toàn để lấy tọa độ Chunk (Chống mọi loại lỗi Mappings)
-        try {
-            try { cx = packet.getChunkX(); cz = packet.getChunkZ(); }
-            catch (Throwable e) { cx = packet.getX(); cz = packet.getZ(); }
-        } catch (Exception ignored) {}
+        // Trả lại hàm chuẩn của 1.21.4, xóa bỏ cái try-catch gây lỗi
+        int cx = packet.getChunkX();
+        int cz = packet.getChunkZ();
 
         if (!isWithinSimulationDistance(cx, cz)) return;
 
@@ -126,7 +122,6 @@ public class SusChunkFinder extends Module {
             });
         }, "SusChunkFinder-AFK-Scan").start();
     }
-
     // -------------------------------------------------------------------------
     // Phân tích Mũi nhọn 2: Không Khí (Air Pocket) & Tuổi Thọ Thực Vật (AFK Growth)
     // -------------------------------------------------------------------------
