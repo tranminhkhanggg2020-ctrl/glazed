@@ -6,15 +6,24 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.BedBlock;
+import net.minecraft.state.property.Properties;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
-
 import com.nnpg.glazed.GlazedAddon;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class SusChunkFinder extends Module {
 
@@ -22,64 +31,69 @@ public class SusChunkFinder extends Module {
     private final SettingGroup sgRender    = settings.createGroup("Render");
     private final SettingGroup sgHeuristic = settings.createGroup("AFK Filters");
 
-    // --- General ---
+    // ==========================================
+    // CÀI ĐẶT GIAO DIỆN (Đúng chuẩn 100% theo ảnh)
+    // ==========================================
+    
     private final Setting<Integer> simulationDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("simulation-distance")
-            .description("Bán kính quét (Chunks).")
-            .defaultValue(4).min(1).max(32).sliderRange(1, 32)
+            .description("Bán kính quét (Chunks). Tối đa 10 để chống lag.")
+            .defaultValue(4).min(1).max(10).sliderRange(1, 10)
             .build()
     );
 
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Mức độ nhạy (Dựa trên số Rương hoặc Điểm nghi ngờ).")
-            .defaultValue(10).min(1).max(20).sliderRange(1, 20)
+            .description("Mức độ nhạy (Điểm nghi ngờ).")
+            .defaultValue(20).min(1).max(20).sliderRange(1, 20)
             .build()
     );
 
-    // --- Render ---
     private final Setting<Integer> alpha = sgRender.add(
         new IntSetting.Builder()
             .name("alpha")
-            .description("Độ trong suốt của ô vuông đỏ.")
-            .defaultValue(52).min(0).max(255).sliderRange(0, 255)
+            .description("Độ trong suốt của khối màu đỏ.")
+            .defaultValue(40).min(0).max(255).sliderRange(0, 255)
             .build()
     );
 
-    // --- AFK Filters ---
     private final Setting<Boolean> filterKelp = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa (age=25).")
-            .defaultValue(true).build()
+            .name("kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa.")
+            .defaultValue(false).build() // Tắt mặc định theo ảnh
     );
     private final Setting<Boolean> filterCaveVines = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("cave-vines").description("Quét Dây leo hang đạt tuổi thọ tối đa (age=25).")
-            .defaultValue(true).build()
-    );
-    private final Setting<Boolean> filterAmethyst = sgHeuristic.add(
-        new BoolSetting.Builder()
-            .name("amethyst").description("Quét sự phát triển của cụm Thạch anh.")
-            .defaultValue(false).build()
+            .name("cave-vines").description("Quét Dây leo hang đạt tuổi thọ tối đa.")
+            .defaultValue(false).build() // Tắt mặc định theo ảnh
     );
     private final Setting<Boolean> filterVines = sgHeuristic.add(
         new BoolSetting.Builder()
             .name("vines").description("Quét sự lan tràn bất thường của Dây leo (>50 khối).")
-            .defaultValue(true).build()
+            .defaultValue(true).build()  // Bật mặc định theo ảnh
     );
-    private final Setting<Boolean> filterBeeNest = sgHeuristic.add(
+    private final Setting<Boolean> filterAmethyst = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("bee-nest").description("Báo động ngay nếu có Tổ ong dưới lòng đất.")
-            .defaultValue(true).build()
+            .name("amethyst").description("Quét sự phát triển của cụm Thạch anh.")
+            .defaultValue(true).build()  // Bật mặc định theo ảnh
+    );
+    private final Setting<Boolean> filterRotatedDeepslate = sgHeuristic.add(
+        new BoolSetting.Builder()
+            .name("rotated-deepslate").description("Quét Đá phiến bị xoay sai trục (Do người đặt).")
+            .defaultValue(false).build() // Tắt mặc định theo ảnh
     );
 
-    // Lưu trữ tọa độ vẽ
+    // ==========================================
+    // HỆ THỐNG LÕI
+    // ==========================================
+
     private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
+    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Base Finder: Quét Rương, Dấu vết con người và AFK.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar siêu cấp quét Base ngầm, NBT và cấu trúc đào.");
     }
 
     @Override
@@ -91,8 +105,8 @@ public class SusChunkFinder extends Module {
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
-        if (event.packet instanceof ChunkDataS2CPacket) {
-            handleChunkData((ChunkDataS2CPacket) event.packet);
+        if (event.packet instanceof ChunkDataS2CPacket packet) {
+            handleChunkData(packet);
         }
     }
 
@@ -107,29 +121,24 @@ public class SusChunkFinder extends Module {
 
         if (renderCache.containsKey(key)) return;
 
-        // BƯỚC 1: Quét Rương/NBT (Chính xác tuyệt đối)
-        int blockEntityCount = 0;
+        // BƯỚC 1: Quét Siêu Stash (Dung lượng) và Rương NBT siêu tốc
         try {
-            java.lang.reflect.Field[] fields = packet.getClass().getDeclaredFields();
-            for (java.lang.reflect.Field f : fields) {
-                f.setAccessible(true);
-                Object val = f.get(packet);
-                if (val instanceof java.util.List<?>) {
-                    blockEntityCount = ((java.util.List<?>) val).size();
-                    break;
-                }
+            int packetSize = packet.getChunkData().getSectionsDataBuf().readableBytes();
+            if (packetSize > 100000) { 
+                renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+                ChatUtils.warning("🚨 [SIÊU STASH] Phát hiện dung lượng cực lớn ở X:" + (cx*16) + " Z:" + (cz*16));
+                return;
+            }
+            int blockEntityCount = packet.getChunkData().getBlockEntitiesData().size(); 
+            if (blockEntityCount >= sensitivity.get()) {
+                renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+                return;
             }
         } catch (Exception ignored) {}
 
-        // Báo động nếu số Rương vượt ngưỡng Sensitivity
-        if (blockEntityCount >= sensitivity.get()) {
-            renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-            return;
-        }
-
-        // BƯỚC 2: Quét Dấu vết con người & Thực vật AFK
+        // BƯỚC 2: Quét Sâu Đa Hình (Dùng ThreadPool chống lag)
         final int finalCx = cx, finalCz = cz;
-        new Thread(() -> {
+        EXECUTOR.execute(() -> {
             try { Thread.sleep(100); } catch (InterruptedException ignored) {}
 
             mc.execute(() -> {
@@ -141,16 +150,17 @@ public class SusChunkFinder extends Module {
                     renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
                 }
             });
-        }, "SusChunkFinder-Deep-Scan").start();
+        });
     }
 
-    // --- Thuật toán quét Lõi ---
+    // --- Thuật toán tính điểm ---
     private int computeSusScore(WorldChunk chunk) {
         int minY = mc.world.getBottomY();
-        int scanMaxY = 40; // Chỉ quét ngầm để tránh mặt đất
+        int scanMaxY = 40; // Chỉ quét ngầm để tránh rác mặt đất
         
         int susScore = 0;
         int vineCount = 0;
+        int airCount = 0; // Đếm khoảng không để tìm hầm
 
         ChunkPos cp = chunk.getPos();
 
@@ -158,59 +168,92 @@ public class SusChunkFinder extends Module {
             for (int z = 0; z < 16; z++) {
                 for (int y = minY; y < scanMaxY; y++) {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
-                    String stateStr = chunk.getBlockState(bp).toString().toLowerCase();
+                    
+                    BlockState state = chunk.getBlockState(bp);
+                    Block block = state.getBlock();
 
-                    // ==========================================
-                    // TÍNH NĂNG BẮT BUỘC: DẤU VẾT NGƯỜI CHƠI
-                    // ==========================================
-                    
-                    // 1. Khối đặt sai hướng (Rotated Deepslate)
-                    if (stateStr.contains("minecraft:deepslate") && stateStr.contains("axis=") && !stateStr.contains("axis=y")) {
-                        susScore += 2; 
-                    }
-                    
-                    // 2. DẤU VẾT ĐỘC QUYỀN (Đã FIX BẪY BEDROCK)
-                    // Dùng "_bed" thay vì "bed" để không dính "bedrock"
-                    if (stateStr.contains("crafting_table") || stateStr.contains("ender_chest") || stateStr.contains("enchanting_table") || stateStr.contains("anvil") || stateStr.contains("_bed") || stateStr.contains("furnace")) {
-                        susScore += 15; 
+                    // Đếm Air để phát hiện hầm đào
+                    if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
+                        airCount++;
+                        continue; // Nếu là khí thì bỏ qua các check dưới cho nhanh
                     }
 
-                    // ==========================================
-                    // CÁC BỘ LỌC TÙY CHỌN (AFK GROWTH)
-                    // ==========================================
-                    
-                    if (filterKelp.get() && stateStr.contains("minecraft:kelp") && stateStr.contains("age=25")) {
-                        susScore += 3; 
+                    // 1. DẤU VẾT BASE NHỎ (Siêu nhạy - Có Đuốc/Bàn là bắt ngay)
+                    if (block == Blocks.CRAFTING_TABLE || block == Blocks.ENDER_CHEST || 
+                        block == Blocks.ENCHANTING_TABLE || block == Blocks.ANVIL || 
+                        block instanceof BedBlock || block == Blocks.FURNACE ||
+                        block == Blocks.TORCH || block == Blocks.WALL_TORCH || block == Blocks.LANTERN ||
+                        block == Blocks.SOUL_TORCH || block == Blocks.SOUL_WALL_TORCH) {
+                        susScore += 20; // Cộng thẳng 20 để báo đỏ lập tức
                     }
-                    if (filterCaveVines.get() && stateStr.contains("minecraft:cave_vines") && stateStr.contains("age=25")) {
-                        susScore += 3;
+
+                    // 2. VẬT LIỆU LẠ DƯỚI LÒNG ĐẤT (Tính năng mới Always ON)
+                    if (block == Blocks.OAK_PLANKS || block == Blocks.SPRUCE_PLANKS || block == Blocks.BIRCH_PLANKS ||
+                        block == Blocks.DARK_OAK_PLANKS || block == Blocks.JUNGLE_PLANKS || block == Blocks.ACACIA_PLANKS ||
+                        block == Blocks.GLASS || block == Blocks.WHITE_CONCRETE || 
+                        block == Blocks.QUARTZ_BLOCK || block == Blocks.SMOOTH_QUARTZ || 
+                        block == Blocks.OBSIDIAN) {
+                        susScore += 5; // Bắt tường nhân tạo
                     }
-                    if (filterAmethyst.get() && stateStr.contains("minecraft:amethyst_cluster")) {
+                    if (block == Blocks.FARMLAND || block == Blocks.DIRT_PATH || block == Blocks.WHEAT || block == Blocks.POTATOES || block == Blocks.CARROTS) {
+                        susScore += 10; // Bắt nông trại ngầm
+                    }
+                    if (block == Blocks.BEE_NEST) {
+                        susScore += 15; // Tổ ong ngầm
+                    }
+
+                    // 3. ĐÁ PHIẾN XOAY (Đã thêm Toggle)
+                    if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
+                        if (state.get(Properties.AXIS) != Direction.Axis.Y) {
+                            susScore += 2; 
+                        }
+                    }
+
+                    // 4. BỘ LỌC TÙY CHỌN KHÁC (AFK Growth)
+                    if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
+                        if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
+                            susScore += 3; 
+                        }
+                    }
+                    if (filterCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) {
+                        if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
+                            susScore += 3;
+                        }
+                    }
+                    if (filterAmethyst.get() && block == Blocks.AMETHYST_CLUSTER) {
                         susScore += 1;
                     }
-                    // Đã FIX BẪY VINE (Loại bỏ cave_vines khỏi đếm vine thường)
-                    if (filterVines.get() && stateStr.contains("minecraft:vine") && !stateStr.contains("cave_vines")) {
+                    if (filterVines.get() && block == Blocks.VINE) {
                         vineCount++;
-                    }
-                    if (filterBeeNest.get() && stateStr.contains("minecraft:bee_nest")) {
-                        susScore += 15; 
                     }
                 }
             }
         }
 
+        // Đánh giá khối lượng Dây leo
         if (filterVines.get() && vineCount > 50) {
-            susScore += 5; // Dây leo lan quá mức
+            susScore += 5;
+        }
+
+        // Tính năng HẦM KHỔNG LỒ (Air Density)
+        // Nếu số lượng khối khí chiếm tỷ lệ lớn bất thường (trên 8000 khối dưới Y=40)
+        if (airCount > 8000) {
+            susScore += 10;
         }
 
         return susScore;
     }
+
+    // ==========================================
+    // RENDER ĐỒ HỌA
+    // ==========================================
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (mc.world == null || renderCache.isEmpty()) return;
 
         int a = alpha.get();
+        // Đổ khối vuông full màu đặc và viền đậm theo yêu cầu
         Color sideColor = new Color(255, 0, 0, a);
         Color lineColor = new Color(255, 0, 0, Math.min(255, a + 80));
 
@@ -226,7 +269,7 @@ public class SusChunkFinder extends Module {
                 bx,       targetY,       bz,
                 bx + 16,  targetY + 0.1, bz + 16,
                 sideColor, lineColor,
-                ShapeMode.Both, 0
+                ShapeMode.Both, 0 // ShapeMode.Both để có cả ruột lẫn viền
             );
         }
     }
