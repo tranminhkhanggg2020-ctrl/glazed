@@ -7,12 +7,14 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
+import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.world.chunk.Chunk;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -100,7 +102,17 @@ public class SusChunkFinder extends Module {
     }
 
     @Override
-    public void onActivate() { renderCache.clear(); }
+    public void onActivate() { 
+        renderCache.clear(); 
+        
+        // TÍNH NĂNG MỚI: QUÉT HỒI TỐ (INITIAL SCAN)
+        // Lấy tất cả các Chunk hiện đang được load quanh người chơi để quét ngay lập tức
+        for (Chunk chunk : Utils.chunks()) {
+            if (chunk instanceof WorldChunk wc) {
+                EXECUTOR.execute(() -> scanWorldChunk(wc, wc.getPos().toLong()));
+            }
+        }
+    }
 
     @Override
     public void onDeactivate() { renderCache.clear(); }
@@ -129,12 +141,12 @@ public class SusChunkFinder extends Module {
             int packetSize = packet.getChunkData().getSectionsDataBuf().readableBytes();
             if (packetSize > 100000) { 
                 renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-                ChatUtils.warning("🚨 [SIÊU STASH] Phát hiện dung lượng cực lớn ở X:" + (cx*16) + " Z:" + (cz*16));
+                ChatUtils.warning("🚨 [SIÊU STASH] Phát hiện dung lượng cực lớn (" + (packetSize/1024) + " KB) ở X:" + (cx*16) + " Z:" + (cz*16));
                 return;
             }
         } catch (Exception ignored) {}
 
-        // BƯỚC 1: Quét Rương/NBT bằng Reflection Cache (Bất tử trước mọi bản Update)
+        // BƯỚC 1: Quét Rương/NBT bằng Reflection Cache
         int blockEntityCount = 0;
         try {
             Object chunkData = packet.getChunkData();
@@ -156,6 +168,7 @@ public class SusChunkFinder extends Module {
 
         if (blockEntityCount >= sensitivity.get()) {
             renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+            ChatUtils.warning("📦 [KHO CHỨA] Phát hiện tập trung Rương/Lò ở X:" + (cx*16) + " Z:" + (cz*16));
             return;
         }
 
@@ -167,13 +180,22 @@ public class SusChunkFinder extends Module {
             mc.execute(() -> {
                 if (mc.world == null) return;
                 WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
-                if (chunk == null) return;
-
-                if (computeSusScore(chunk) >= sensitivity.get()) {
-                    renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
+                if (chunk != null) {
+                    scanWorldChunk(chunk, key);
                 }
             });
         });
+    }
+
+    // Hàm quét khối dùng chung cho cả Initial Scan và Packet Scan
+    private void scanWorldChunk(WorldChunk chunk, long key) {
+        if (renderCache.containsKey(key)) return;
+        
+        int score = computeSusScore(chunk);
+        if (score >= sensitivity.get()) {
+            renderCache.put(key, new int[]{ chunk.getPos().x * 16, chunk.getPos().z * 16 });
+            ChatUtils.warning("⚠️ [BASE/HẦM] Phát hiện ở X:" + (chunk.getPos().x * 16) + " Z:" + (chunk.getPos().z * 16) + " (Điểm: " + score + ")");
+        }
     }
 
     // --- Thuật toán tính điểm ---
