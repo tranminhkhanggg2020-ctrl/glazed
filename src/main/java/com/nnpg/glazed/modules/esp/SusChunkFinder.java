@@ -6,7 +6,6 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
-import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
@@ -83,7 +82,7 @@ public class SusChunkFinder extends Module {
     );
     private final Setting<Boolean> filterRotatedDeepslate = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("rotated-deepslate").description("Quét Đá phiến bị xoay sai trục.")
+            .name("rotated-deepslate").description("Quét Đá phiến bị xoay sai trục (Do người đặt).")
             .defaultValue(false).build() 
     );
 
@@ -93,6 +92,8 @@ public class SusChunkFinder extends Module {
 
     private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
+    
+    // BIẾN CACHE REFLECTION
     private static java.lang.reflect.Field cachedBlockEntitiesField = null;
 
     public SusChunkFinder() {
@@ -103,7 +104,7 @@ public class SusChunkFinder extends Module {
     public void onActivate() { 
         renderCache.clear(); 
         
-        // Quét hồi tố (Initial Scan) - Quét tất cả Chunk hiện có
+        // Quét Hồi Tố (Initial Scan)
         for (Chunk chunk : Utils.chunks()) {
             if (chunk instanceof WorldChunk wc) {
                 EXECUTOR.execute(() -> scanWorldChunk(wc, wc.getPos().toLong()));
@@ -133,17 +134,16 @@ public class SusChunkFinder extends Module {
 
         if (renderCache.containsKey(key)) return;
 
-        // Quét Siêu Stash
+        // Quét Siêu Stash (Hoàn toàn Im lặng)
         try {
             int packetSize = packet.getChunkData().getSectionsDataBuf().readableBytes();
             if (packetSize > 100000) { 
                 renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-                ChatUtils.warning("🚨 [SIÊU STASH] Phát hiện dung lượng cực lớn ở X:" + (cx*16) + " Z:" + (cz*16));
                 return;
             }
         } catch (Exception ignored) {}
 
-        // Quét Rương/NBT
+        // Quét Rương/NBT (Hoàn toàn Im lặng)
         int blockEntityCount = 0;
         try {
             Object chunkData = packet.getChunkData();
@@ -165,7 +165,6 @@ public class SusChunkFinder extends Module {
 
         if (blockEntityCount >= sensitivity.get()) {
             renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-            ChatUtils.warning("📦 [KHO CHỨA] Phát hiện tập trung Rương/Lò ở X:" + (cx*16) + " Z:" + (cz*16));
             return;
         }
 
@@ -189,11 +188,10 @@ public class SusChunkFinder extends Module {
         int score = computeSusScore(chunk);
         if (score >= sensitivity.get()) {
             renderCache.put(key, new int[]{ chunk.getPos().x * 16, chunk.getPos().z * 16 });
-            ChatUtils.warning("⚠️ [BASE/HẦM] Phát hiện ở X:" + (chunk.getPos().x * 16) + " Z:" + (chunk.getPos().z * 16) + " (Điểm: " + score + ")");
         }
     }
 
-    // --- THUẬT TOÁN TÍNH ĐIỂM (Đã tích hợp Pillar & Trial Chamber Filter) ---
+    // --- THUẬT TOÁN TÍNH ĐIỂM (Tích hợp Pillar & Trial Chamber Filter) ---
     private int computeSusScore(WorldChunk chunk) {
         int minY = mc.world.getBottomY();
         int scanMaxY = 40; 
@@ -201,11 +199,11 @@ public class SusChunkFinder extends Module {
         int susScore = 0;
         int vineCount = 0;
         int airCount = 0; 
-        int trialChamberIndicatorCount = 0; // Bộ đếm khối Trial Chamber
+        int trialChamberIndicatorCount = 0; 
 
         ChunkPos cp = chunk.getPos();
 
-        // Quét theo trục dọc (x, z -> y) để tiện bắt Cột (Pillars)
+        // Quét theo trục dọc
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 
@@ -221,12 +219,11 @@ public class SusChunkFinder extends Module {
 
                     if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
                         airCount++;
-                        // Reset đếm cột nếu gặp khoảng không
                         cobblePillar = 0; netherrackPillar = 0; dirtPillar = 0;
                         continue; 
                     }
 
-                    // TÍNH NĂNG MỚI: BỘ LỌC HẦM NGỤC (Trial Chamber Filter)
+                    // LỌC HẦM NGỤC (Trial Chamber Filter)
                     if (block == Blocks.TUFF_BRICKS || block == Blocks.CHISELED_TUFF || 
                         block == Blocks.CHISELED_TUFF_BRICKS || block == Blocks.VAULT || 
                         block == Blocks.TRIAL_SPAWNER || block == Blocks.COPPER_BULB || 
@@ -235,15 +232,13 @@ public class SusChunkFinder extends Module {
                         trialChamberIndicatorCount++;
                     }
 
-                    // TÍNH NĂNG MỚI: BẮT CỘT RÁC (Vertical Line Detection)
+                    // BẮT CỘT RÁC
                     if (block == Blocks.COBBLESTONE) cobblePillar++; else cobblePillar = 0;
                     if (block == Blocks.NETHERRACK) netherrackPillar++; else netherrackPillar = 0;
                     if (block == Blocks.DIRT) dirtPillar++; else dirtPillar = 0;
 
-                    // Nếu lặp lại liên tục 6 khối thẳng đứng -> Người chơi vừa lấp lỗ hoặc pillar lên
                     if (cobblePillar == 6 || netherrackPillar == 6 || dirtPillar == 6) {
                         susScore += 15; 
-                        // Sét số âm để không bị cộng dồn liên tục nếu cột cao 20 block
                         cobblePillar = -999; netherrackPillar = -999; dirtPillar = -999; 
                     }
 
@@ -299,11 +294,10 @@ public class SusChunkFinder extends Module {
             }
         }
 
-        // Nếu đây là Trial Chamber (>40 khối đặc trưng), HỦY BỎ các điểm nghi ngờ tự nhiên để chống báo ảo
+        // HỦY BỎ báo ảo do Trial Chamber
         if (trialChamberIndicatorCount > 40) {
-            // Chỉ giữ lại báo động nếu điểm cực kỳ cao (Người chơi thực sự xây base ở trong Trial Chamber)
             if (susScore < 25) {
-                return 0; // Trả về 0, chunk an toàn
+                return 0; 
             }
         }
 
@@ -311,6 +305,7 @@ public class SusChunkFinder extends Module {
             susScore += 5;
         }
 
+        // HẦM KHỔNG LỒ (Air Density)
         if (airCount > 8000) {
             susScore += 10;
         }
