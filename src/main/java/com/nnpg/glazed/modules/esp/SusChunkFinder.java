@@ -6,14 +6,13 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
-import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.WorldChunk;
-import net.minecraft.world.chunk.Chunk;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -93,7 +92,7 @@ public class SusChunkFinder extends Module {
     private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
     
-    // BIẾN CACHE REFLECTION
+    // BIẾN CACHE REFLECTION: Chống lỗi đổi tên hàm của Minecraft và tối ưu siêu tốc
     private static java.lang.reflect.Field cachedBlockEntitiesField = null;
 
     public SusChunkFinder() {
@@ -101,16 +100,7 @@ public class SusChunkFinder extends Module {
     }
 
     @Override
-    public void onActivate() { 
-        renderCache.clear(); 
-        
-        // Quét Hồi Tố (Initial Scan)
-        for (Chunk chunk : Utils.chunks()) {
-            if (chunk instanceof WorldChunk wc) {
-                EXECUTOR.execute(() -> scanWorldChunk(wc, wc.getPos().toLong()));
-            }
-        }
-    }
+    public void onActivate() { renderCache.clear(); }
 
     @Override
     public void onDeactivate() { renderCache.clear(); }
@@ -134,16 +124,17 @@ public class SusChunkFinder extends Module {
 
         if (renderCache.containsKey(key)) return;
 
-        // Quét Siêu Stash (Hoàn toàn Im lặng)
+        // BƯỚC 0: Quét Siêu Stash bằng dung lượng gói tin
         try {
             int packetSize = packet.getChunkData().getSectionsDataBuf().readableBytes();
             if (packetSize > 100000) { 
                 renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+                ChatUtils.warning("🚨 [SIÊU STASH] Phát hiện dung lượng cực lớn ở X:" + (cx*16) + " Z:" + (cz*16));
                 return;
             }
         } catch (Exception ignored) {}
 
-        // Quét Rương/NBT (Hoàn toàn Im lặng)
+        // BƯỚC 1: Quét Rương/NBT bằng Reflection Cache (Bất tử trước mọi bản Update)
         int blockEntityCount = 0;
         try {
             Object chunkData = packet.getChunkData();
@@ -168,30 +159,24 @@ public class SusChunkFinder extends Module {
             return;
         }
 
-        // Quét Sâu
+        // BƯỚC 2: Quét Sâu Đa Hình (Dùng ThreadPool chống lag)
         final int finalCx = cx, finalCz = cz;
         EXECUTOR.execute(() -> {
             try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+
             mc.execute(() -> {
                 if (mc.world == null) return;
                 WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
-                if (chunk != null) {
-                    scanWorldChunk(chunk, key);
+                if (chunk == null) return;
+
+                if (computeSusScore(chunk) >= sensitivity.get()) {
+                    renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
                 }
             });
         });
     }
 
-    private void scanWorldChunk(WorldChunk chunk, long key) {
-        if (renderCache.containsKey(key)) return;
-        
-        int score = computeSusScore(chunk);
-        if (score >= sensitivity.get()) {
-            renderCache.put(key, new int[]{ chunk.getPos().x * 16, chunk.getPos().z * 16 });
-        }
-    }
-
-    // --- THUẬT TOÁN TÍNH ĐIỂM (Tích hợp Pillar & Trial Chamber Filter) ---
+    // --- Thuật toán tính điểm ---
     private int computeSusScore(WorldChunk chunk) {
         int minY = mc.world.getBottomY();
         int scanMaxY = 40; 
@@ -199,18 +184,11 @@ public class SusChunkFinder extends Module {
         int susScore = 0;
         int vineCount = 0;
         int airCount = 0; 
-        int trialChamberIndicatorCount = 0; 
 
         ChunkPos cp = chunk.getPos();
 
-        // Quét theo trục dọc
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
-                
-                int cobblePillar = 0;
-                int netherrackPillar = 0;
-                int dirtPillar = 0;
-
                 for (int y = minY; y < scanMaxY; y++) {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
                     
@@ -219,27 +197,7 @@ public class SusChunkFinder extends Module {
 
                     if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
                         airCount++;
-                        cobblePillar = 0; netherrackPillar = 0; dirtPillar = 0;
                         continue; 
-                    }
-
-                    // LỌC HẦM NGỤC (Trial Chamber Filter)
-                    if (block == Blocks.TUFF_BRICKS || block == Blocks.CHISELED_TUFF || 
-                        block == Blocks.CHISELED_TUFF_BRICKS || block == Blocks.VAULT || 
-                        block == Blocks.TRIAL_SPAWNER || block == Blocks.COPPER_BULB || 
-                        block == Blocks.COPPER_GRATE || block == Blocks.WAXED_COPPER_BLOCK || 
-                        block == Blocks.WAXED_OXIDIZED_COPPER) {
-                        trialChamberIndicatorCount++;
-                    }
-
-                    // BẮT CỘT RÁC
-                    if (block == Blocks.COBBLESTONE) cobblePillar++; else cobblePillar = 0;
-                    if (block == Blocks.NETHERRACK) netherrackPillar++; else netherrackPillar = 0;
-                    if (block == Blocks.DIRT) dirtPillar++; else dirtPillar = 0;
-
-                    if (cobblePillar == 6 || netherrackPillar == 6 || dirtPillar == 6) {
-                        susScore += 15; 
-                        cobblePillar = -999; netherrackPillar = -999; dirtPillar = -999; 
                     }
 
                     // 1. DẤU VẾT BASE NHỎ (Siêu nhạy)
@@ -294,18 +252,11 @@ public class SusChunkFinder extends Module {
             }
         }
 
-        // HỦY BỎ báo ảo do Trial Chamber
-        if (trialChamberIndicatorCount > 40) {
-            if (susScore < 25) {
-                return 0; 
-            }
-        }
-
         if (filterVines.get() && vineCount > 50) {
             susScore += 5;
         }
 
-        // HẦM KHỔNG LỒ (Air Density)
+        // Tính năng HẦM KHỔNG LỒ (Air Density)
         if (airCount > 8000) {
             susScore += 10;
         }
