@@ -6,7 +6,6 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
-import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.util.math.BlockPos;
@@ -16,7 +15,6 @@ import net.minecraft.world.chunk.WorldChunk;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.block.BedBlock;
 import net.minecraft.state.property.Properties;
 
 import com.nnpg.glazed.GlazedAddon;
@@ -39,7 +37,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> simulationDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("simulation-distance")
-            .description("Bán kính quét (Chunks). Tối đa 10 để chống lag.")
+            .description("Bán kính quét (Chunks). Tối đa 10.")
             .defaultValue(4).min(1).max(10).sliderRange(1, 10)
             .build()
     );
@@ -47,48 +45,32 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Mức độ nhạy (Điểm nghi ngờ).")
-            .defaultValue(20).min(1).max(100).sliderRange(1, 50)
-            .build()
-    );
-
-    private final Setting<Integer> scanMinY = sgGeneral.add(
-        new IntSetting.Builder()
-            .name("scan-min-y")
-            .description("Độ cao tối thiểu để quét block.")
-            .defaultValue(-64).min(-64).max(319).sliderRange(-64, 319)
-            .build()
-    );
-
-    private final Setting<Integer> scanMaxY = sgGeneral.add(
-        new IntSetting.Builder()
-            .name("scan-max-y")
-            .description("Độ cao tối đa để quét block.")
-            .defaultValue(60).min(-64).max(319).sliderRange(-64, 319)
+            .description("Độ nhạy của Radar (1 = Thấp, 20 = Rất nhạy).")
+            .defaultValue(10).min(1).max(20).sliderRange(1, 20)
             .build()
     );
 
     private final Setting<Integer> alpha = sgRender.add(
         new IntSetting.Builder()
             .name("alpha")
-            .description("Độ trong suốt của khối màu đỏ.")
+            .description("Độ trong suốt của thảm màu đỏ.")
             .defaultValue(40).min(0).max(255).sliderRange(0, 255)
             .build()
     );
 
     private final Setting<Boolean> filterKelp = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa.")
-            .defaultValue(false).build() 
+            .name("kelp").description("Quét Tảo bẹ đạt tuổi thọ tối đa (Do AFK lâu).")
+            .defaultValue(true).build() 
     );
     private final Setting<Boolean> filterCaveVines = sgHeuristic.add(
         new BoolSetting.Builder()
             .name("cave-vines").description("Quét Dây leo hang đạt tuổi thọ tối đa.")
-            .defaultValue(false).build() 
+            .defaultValue(true).build() 
     );
     private final Setting<Boolean> filterVines = sgHeuristic.add(
         new BoolSetting.Builder()
-            .name("vines").description("Quét sự lan tràn bất thường của Dây leo (>50 khối).")
+            .name("vines").description("Quét sự lan tràn bất thường của Dây leo.")
             .defaultValue(true).build()  
     );
     private final Setting<Boolean> filterAmethyst = sgHeuristic.add(
@@ -99,7 +81,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> filterRotatedDeepslate = sgHeuristic.add(
         new BoolSetting.Builder()
             .name("rotated-deepslate").description("Quét Đá phiến bị xoay sai trục (Do người đặt).")
-            .defaultValue(false).build() 
+            .defaultValue(true).build() 
     );
 
     // ==========================================
@@ -108,11 +90,9 @@ public class SusChunkFinder extends Module {
 
     private final Map<Long, int[]> renderCache = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
-    
-    private static java.lang.reflect.Field cachedBlockEntitiesField = null;
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar siêu cấp quét Base ngầm, NBT và cấu trúc đào.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar phân tích địa hình, cấu trúc hang và dấu vết AFK.");
     }
 
     @Override
@@ -140,49 +120,24 @@ public class SusChunkFinder extends Module {
 
         if (renderCache.containsKey(key)) return;
 
-        try {
-            int packetSize = packet.getChunkData().getSectionsDataBuf().readableBytes();
-            if (packetSize > 100000) { 
-                renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-                ChatUtils.warning("🚨 [SIÊU STASH] Phát hiện dung lượng cực lớn ở X:" + (cx*16) + " Z:" + (cz*16));
-                return;
-            }
-        } catch (Exception ignored) {}
-
-        int blockEntityCount = 0;
-        try {
-            Object chunkData = packet.getChunkData();
-            if (chunkData != null) {
-                if (cachedBlockEntitiesField == null) {
-                    for (java.lang.reflect.Field f : chunkData.getClass().getDeclaredFields()) {
-                        if (java.util.List.class.isAssignableFrom(f.getType())) {
-                            f.setAccessible(true);
-                            cachedBlockEntitiesField = f;
-                            break;
-                        }
-                    }
-                }
-                if (cachedBlockEntitiesField != null) {
-                    blockEntityCount = ((java.util.List<?>) cachedBlockEntitiesField.get(chunkData)).size();
-                }
-            }
-        } catch (Exception ignored) {}
-
-        if (blockEntityCount >= sensitivity.get()) {
-            renderCache.put(key, new int[]{ cx * 16, cz * 16 });
-            return;
-        }
-
         final int finalCx = cx, finalCz = cz;
         EXECUTOR.execute(() -> {
             try {
+                // Đợi một chút để chunk kịp load vào thế giới
                 Thread.sleep(50);
                 
                 if (mc.world == null) return;
                 WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
                 
                 if (chunk != null && !chunk.isEmpty()) {
-                    if (computeSusScore(chunk) >= sensitivity.get()) {
+                    int score = computeSusScore(chunk);
+                    
+                    // Công thức chuyển đổi Độ nhạy (1-20) thành Ngưỡng điểm
+                    // Độ nhạy 20 -> Cần 10 điểm để báo động
+                    // Độ nhạy 1  -> Cần 200 điểm để báo động
+                    int threshold = (21 - sensitivity.get()) * 10;
+
+                    if (score >= threshold) {
                         renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
                     }
                 }
@@ -191,10 +146,8 @@ public class SusChunkFinder extends Module {
     }
 
     private int computeSusScore(WorldChunk chunk) {
-        // --- FIX LỖI BUILD Ở ĐÂY ---
-        int startY = Math.max(mc.world.getBottomY(), scanMinY.get());
-        int worldTopY = mc.world.getBottomY() + mc.world.getHeight() - 1;
-        int endY = Math.min(worldTopY, scanMaxY.get());
+        int startY = mc.world.getBottomY();
+        int endY = mc.world.getBottomY() + mc.world.getHeight() - 1;
         
         int susScore = 0;
         int vineCount = 0;
@@ -209,69 +162,63 @@ public class SusChunkFinder extends Module {
                     BlockState state = chunk.getBlockState(bp);
                     Block block = state.getBlock();
 
+                    // Đếm lượng không khí để đo kích thước hang động nhân tạo
                     if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
                         airCount++;
                         continue; 
                     }
 
-                    if (block == Blocks.CRAFTING_TABLE || block == Blocks.ENDER_CHEST || 
-                        block == Blocks.ENCHANTING_TABLE || block == Blocks.ANVIL || 
-                        block instanceof BedBlock || block == Blocks.FURNACE ||
-                        block == Blocks.TORCH || block == Blocks.WALL_TORCH || block == Blocks.LANTERN ||
-                        block == Blocks.SOUL_TORCH || block == Blocks.SOUL_WALL_TORCH) {
-                        susScore += 20; 
-                    }
-
-                    if (block == Blocks.OAK_PLANKS || block == Blocks.SPRUCE_PLANKS || block == Blocks.BIRCH_PLANKS ||
-                        block == Blocks.DARK_OAK_PLANKS || block == Blocks.JUNGLE_PLANKS || block == Blocks.ACACIA_PLANKS ||
-                        block == Blocks.GLASS || block == Blocks.WHITE_CONCRETE || 
-                        block == Blocks.QUARTZ_BLOCK || block == Blocks.SMOOTH_QUARTZ || 
-                        block == Blocks.OBSIDIAN) {
-                        susScore += 5; 
-                    }
-                    if (block == Blocks.FARMLAND || block == Blocks.DIRT_PATH || block == Blocks.WHEAT || block == Blocks.POTATOES || block == Blocks.CARROTS) {
-                        susScore += 10; 
-                    }
-                    if (block == Blocks.BEE_NEST) {
-                        susScore += 15; 
-                    }
-
+                    // 1. Đá phiến xoay sai trục (Dấu vết thủ công rất rõ ràng)
                     if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
                         if (state.get(Properties.AXIS) != Direction.Axis.Y) {
-                            susScore += 2; 
+                            susScore += 5; // Điểm cao vì tỷ lệ tự nhiên sinh ra rất thấp
                         }
                     }
 
+                    // 2. Dấu vết AFK (Thực vật/Khoáng sản max tuổi/size)
                     if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
                         if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
-                            susScore += 3; 
+                            susScore += 2; 
                         }
                     }
                     if (filterCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) {
                         if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
-                            susScore += 3;
+                            susScore += 2;
                         }
                     }
                     if (filterAmethyst.get() && block == Blocks.AMETHYST_CLUSTER) {
-                        susScore += 1;
+                        susScore += 2;
                     }
                     if (filterVines.get() && block == Blocks.VINE) {
                         vineCount++;
+                        susScore += 1;
                     }
                 }
             }
         }
 
+        // --- CỘNG ĐIỂM DỰA TRÊN QUY MÔ ---
+
+        // Dây leo mọc quá nhiều (Dấu hiệu của base hoặc farm)
         if (filterVines.get() && vineCount > 50) {
-            susScore += 5;
+            susScore += 20;
         }
 
+        // Hầm mỏ nhân tạo khổng lồ / Stash được đào rộng (Air volume)
+        // Một chunk bình thường có khoảng 1000 - 3000 khối không khí ở dưới lòng đất.
         if (airCount > 8000) {
-            susScore += 10;
+            susScore += 50; // Hầm khá lớn
+        }
+        if (airCount > 15000) {
+            susScore += 100; // Hầm khổng lồ (Chắc chắn có người đào)
         }
 
         return susScore;
     }
+
+    // ==========================================
+    // RENDER ĐỒ HỌA
+    // ==========================================
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
@@ -283,9 +230,8 @@ public class SusChunkFinder extends Module {
 
         pruneDistantChunks();
 
-        // --- FIX LỖI BUILD Ở ĐÂY ---
-        int bottomY = mc.world.getBottomY();
-        int topY = mc.world.getBottomY() + mc.world.getHeight();
+        // Ép Box chỉ hiển thị ở Y = 50 (dày 0.1 block) giống như một cái thảm đỏ
+        double targetY = 50.0;
 
         for (Map.Entry<Long, int[]> entry : renderCache.entrySet()) {
             int[] coords = entry.getValue();
@@ -293,8 +239,8 @@ public class SusChunkFinder extends Module {
             int bz = coords[1];
 
             event.renderer.box(
-                bx,      bottomY, bz,
-                bx + 16, topY,    bz + 16,
+                bx,      targetY,       bz,
+                bx + 16, targetY + 0.1, bz + 16,
                 sideColor, lineColor,
                 ShapeMode.Both, 0 
             );
