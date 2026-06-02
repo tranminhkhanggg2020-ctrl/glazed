@@ -106,11 +106,9 @@ public class SusChunkFinder extends Module {
     // HỆ THỐNG LÕI
     // ==========================================
 
-    // Dùng ConcurrentHashMap thay cho Long2ObjectOpenHashMap để chống Crash khi chạy đa luồng
     private final Map<Long, int[]> renderCache = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
     
-    // BIẾN CACHE REFLECTION
     private static java.lang.reflect.Field cachedBlockEntitiesField = null;
 
     public SusChunkFinder() {
@@ -142,7 +140,6 @@ public class SusChunkFinder extends Module {
 
         if (renderCache.containsKey(key)) return;
 
-        // BƯỚC 0: Quét Siêu Stash bằng dung lượng gói tin
         try {
             int packetSize = packet.getChunkData().getSectionsDataBuf().readableBytes();
             if (packetSize > 100000) { 
@@ -152,7 +149,6 @@ public class SusChunkFinder extends Module {
             }
         } catch (Exception ignored) {}
 
-        // BƯỚC 1: Quét Rương/NBT bằng Reflection Cache
         int blockEntityCount = 0;
         try {
             Object chunkData = packet.getChunkData();
@@ -177,11 +173,9 @@ public class SusChunkFinder extends Module {
             return;
         }
 
-        // BƯỚC 2: Quét Sâu Đa Hình (Chạy ngầm hoàn toàn 100%)
         final int finalCx = cx, finalCz = cz;
         EXECUTOR.execute(() -> {
             try {
-                // Đợi một chút để đảm bảo client đã nạp chunk này vào thế giới
                 Thread.sleep(50);
                 
                 if (mc.world == null) return;
@@ -192,17 +186,15 @@ public class SusChunkFinder extends Module {
                         renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
                     }
                 }
-            } catch (Exception e) {
-                // Bắt Exception tĩnh lặng để chặn ConcurrentModificationException khi đọc world từ luồng ngoài
-            }
+            } catch (Exception e) {}
         });
     }
 
-    // --- Thuật toán tính điểm ---
     private int computeSusScore(WorldChunk chunk) {
-        // Lấy dải quét từ Setting thay vì hardcode
+        // --- FIX LỖI BUILD Ở ĐÂY ---
         int startY = Math.max(mc.world.getBottomY(), scanMinY.get());
-        int endY = Math.min(mc.world.getTopY(), scanMaxY.get());
+        int worldTopY = mc.world.getBottomY() + mc.world.getHeight() - 1;
+        int endY = Math.min(worldTopY, scanMaxY.get());
         
         int susScore = 0;
         int vineCount = 0;
@@ -222,7 +214,6 @@ public class SusChunkFinder extends Module {
                         continue; 
                     }
 
-                    // 1. DẤU VẾT BASE NHỎ (Siêu nhạy)
                     if (block == Blocks.CRAFTING_TABLE || block == Blocks.ENDER_CHEST || 
                         block == Blocks.ENCHANTING_TABLE || block == Blocks.ANVIL || 
                         block instanceof BedBlock || block == Blocks.FURNACE ||
@@ -231,7 +222,6 @@ public class SusChunkFinder extends Module {
                         susScore += 20; 
                     }
 
-                    // 2. VẬT LIỆU LẠ DƯỚI LÒNG ĐẤT 
                     if (block == Blocks.OAK_PLANKS || block == Blocks.SPRUCE_PLANKS || block == Blocks.BIRCH_PLANKS ||
                         block == Blocks.DARK_OAK_PLANKS || block == Blocks.JUNGLE_PLANKS || block == Blocks.ACACIA_PLANKS ||
                         block == Blocks.GLASS || block == Blocks.WHITE_CONCRETE || 
@@ -246,14 +236,12 @@ public class SusChunkFinder extends Module {
                         susScore += 15; 
                     }
 
-                    // 3. ĐÁ PHIẾN XOAY
                     if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
                         if (state.get(Properties.AXIS) != Direction.Axis.Y) {
                             susScore += 2; 
                         }
                     }
 
-                    // 4. BỘ LỌC TÙY CHỌN KHÁC 
                     if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
                         if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
                             susScore += 3; 
@@ -278,17 +266,12 @@ public class SusChunkFinder extends Module {
             susScore += 5;
         }
 
-        // Tính năng HẦM KHỔNG LỒ (Air Density)
         if (airCount > 8000) {
             susScore += 10;
         }
 
         return susScore;
     }
-
-    // ==========================================
-    // RENDER ĐỒ HỌA
-    // ==========================================
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
@@ -300,16 +283,15 @@ public class SusChunkFinder extends Module {
 
         pruneDistantChunks();
 
-        // Lấy giới hạn độ cao của thế giới (giúp cột Box hiện toàn bộ chunk)
+        // --- FIX LỖI BUILD Ở ĐÂY ---
         int bottomY = mc.world.getBottomY();
-        int topY = mc.world.getTopY();
+        int topY = mc.world.getBottomY() + mc.world.getHeight();
 
         for (Map.Entry<Long, int[]> entry : renderCache.entrySet()) {
             int[] coords = entry.getValue();
             int bx = coords[0];
             int bz = coords[1];
 
-            // Render cột trụ (Pillar) phủ kín Chunk để dễ nhìn từ xa
             event.renderer.box(
                 bx,      bottomY, bz,
                 bx + 16, topY,    bz + 16,
@@ -325,7 +307,6 @@ public class SusChunkFinder extends Module {
         int playerCz = mc.player.getChunkPos().z;
         int dist = simulationDistance.get();
 
-        // Sử dụng entrySet().removeIf an toàn trên ConcurrentHashMap
         renderCache.entrySet().removeIf(entry -> {
             ChunkPos cp = new ChunkPos(entry.getKey());
             return Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
