@@ -19,9 +19,10 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.BedBlock;
 import net.minecraft.state.property.Properties;
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import com.nnpg.glazed.GlazedAddon;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -47,7 +48,23 @@ public class SusChunkFinder extends Module {
         new IntSetting.Builder()
             .name("sensitivity")
             .description("Mức độ nhạy (Điểm nghi ngờ).")
-            .defaultValue(20).min(1).max(20).sliderRange(1, 20)
+            .defaultValue(20).min(1).max(100).sliderRange(1, 50)
+            .build()
+    );
+
+    private final Setting<Integer> scanMinY = sgGeneral.add(
+        new IntSetting.Builder()
+            .name("scan-min-y")
+            .description("Độ cao tối thiểu để quét block.")
+            .defaultValue(-64).min(-64).max(319).sliderRange(-64, 319)
+            .build()
+    );
+
+    private final Setting<Integer> scanMaxY = sgGeneral.add(
+        new IntSetting.Builder()
+            .name("scan-max-y")
+            .description("Độ cao tối đa để quét block.")
+            .defaultValue(60).min(-64).max(319).sliderRange(-64, 319)
             .build()
     );
 
@@ -89,10 +106,11 @@ public class SusChunkFinder extends Module {
     // HỆ THỐNG LÕI
     // ==========================================
 
-    private final Long2ObjectOpenHashMap<int[]> renderCache = new Long2ObjectOpenHashMap<>();
+    // Dùng ConcurrentHashMap thay cho Long2ObjectOpenHashMap để chống Crash khi chạy đa luồng
+    private final Map<Long, int[]> renderCache = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
     
-    // BIẾN CACHE REFLECTION: Chống lỗi đổi tên hàm của Minecraft và tối ưu siêu tốc
+    // BIẾN CACHE REFLECTION
     private static java.lang.reflect.Field cachedBlockEntitiesField = null;
 
     public SusChunkFinder() {
@@ -134,7 +152,7 @@ public class SusChunkFinder extends Module {
             }
         } catch (Exception ignored) {}
 
-        // BƯỚC 1: Quét Rương/NBT bằng Reflection Cache (Bất tử trước mọi bản Update)
+        // BƯỚC 1: Quét Rương/NBT bằng Reflection Cache
         int blockEntityCount = 0;
         try {
             Object chunkData = packet.getChunkData();
@@ -159,27 +177,32 @@ public class SusChunkFinder extends Module {
             return;
         }
 
-        // BƯỚC 2: Quét Sâu Đa Hình (Dùng ThreadPool chống lag)
+        // BƯỚC 2: Quét Sâu Đa Hình (Chạy ngầm hoàn toàn 100%)
         final int finalCx = cx, finalCz = cz;
         EXECUTOR.execute(() -> {
-            try { Thread.sleep(100); } catch (InterruptedException ignored) {}
-
-            mc.execute(() -> {
+            try {
+                // Đợi một chút để đảm bảo client đã nạp chunk này vào thế giới
+                Thread.sleep(50);
+                
                 if (mc.world == null) return;
                 WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
-                if (chunk == null) return;
-
-                if (computeSusScore(chunk) >= sensitivity.get()) {
-                    renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
+                
+                if (chunk != null && !chunk.isEmpty()) {
+                    if (computeSusScore(chunk) >= sensitivity.get()) {
+                        renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
+                    }
                 }
-            });
+            } catch (Exception e) {
+                // Bắt Exception tĩnh lặng để chặn ConcurrentModificationException khi đọc world từ luồng ngoài
+            }
         });
     }
 
     // --- Thuật toán tính điểm ---
     private int computeSusScore(WorldChunk chunk) {
-        int minY = mc.world.getBottomY();
-        int scanMaxY = 40; 
+        // Lấy dải quét từ Setting thay vì hardcode
+        int startY = Math.max(mc.world.getBottomY(), scanMinY.get());
+        int endY = Math.min(mc.world.getTopY(), scanMaxY.get());
         
         int susScore = 0;
         int vineCount = 0;
@@ -189,9 +212,8 @@ public class SusChunkFinder extends Module {
 
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
-                for (int y = minY; y < scanMaxY; y++) {
+                for (int y = startY; y <= endY; y++) {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
-                    
                     BlockState state = chunk.getBlockState(bp);
                     Block block = state.getBlock();
 
@@ -276,17 +298,21 @@ public class SusChunkFinder extends Module {
         Color sideColor = new Color(255, 0, 0, a);
         Color lineColor = new Color(255, 0, 0, Math.min(255, a + 80));
 
-        int targetY = 50;
         pruneDistantChunks();
 
-        for (var entry : renderCache.long2ObjectEntrySet()) {
+        // Lấy giới hạn độ cao của thế giới (giúp cột Box hiện toàn bộ chunk)
+        int bottomY = mc.world.getBottomY();
+        int topY = mc.world.getTopY();
+
+        for (Map.Entry<Long, int[]> entry : renderCache.entrySet()) {
             int[] coords = entry.getValue();
             int bx = coords[0];
             int bz = coords[1];
 
+            // Render cột trụ (Pillar) phủ kín Chunk để dễ nhìn từ xa
             event.renderer.box(
-                bx,       targetY,       bz,
-                bx + 16,  targetY + 0.1, bz + 16,
+                bx,      bottomY, bz,
+                bx + 16, topY,    bz + 16,
                 sideColor, lineColor,
                 ShapeMode.Both, 0 
             );
@@ -299,8 +325,9 @@ public class SusChunkFinder extends Module {
         int playerCz = mc.player.getChunkPos().z;
         int dist = simulationDistance.get();
 
-        renderCache.long2ObjectEntrySet().removeIf(entry -> {
-            ChunkPos cp = new ChunkPos(entry.getLongKey());
+        // Sử dụng entrySet().removeIf an toàn trên ConcurrentHashMap
+        renderCache.entrySet().removeIf(entry -> {
+            ChunkPos cp = new ChunkPos(entry.getKey());
             return Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
         });
     }
