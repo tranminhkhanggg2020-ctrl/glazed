@@ -16,6 +16,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.state.property.Properties;
+import net.minecraft.network.PacketByteBuf;
 
 import com.nnpg.glazed.GlazedAddon;
 
@@ -54,7 +55,7 @@ public class SusChunkFinder extends Module {
         new IntSetting.Builder()
             .name("alpha")
             .description("Độ trong suốt của thảm màu đỏ.")
-            .defaultValue(40).min(0).max(255).sliderRange(0, 255)
+            .defaultValue(52).min(0).max(255).sliderRange(0, 255)
             .build()
     );
 
@@ -104,86 +105,104 @@ public class SusChunkFinder extends Module {
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
+        
         if (event.packet instanceof ChunkDataS2CPacket packet) {
-            handleChunkData(packet);
+            int cx = packet.getChunkX();
+            int cz = packet.getChunkZ();
+
+            if (!isWithinSimulationDistance(cx, cz)) return;
+
+            ChunkPos pos = new ChunkPos(cx, cz);
+            long key = pos.toLong();
+
+            if (renderCache.containsKey(key)) return;
+
+            // [VŨ KHÍ 1]: QUÉT DUNG LƯỢNG MẠNG CHỐNG ANTI-XRAY
+            // Các server như DonutSMP không gửi block nhưng VẪN gửi NBT data của Chest/Shulker để chống crash client.
+            try {
+                PacketByteBuf buf = packet.getChunkData().getSectionsDataBuf();
+                int packetSize = buf.readableBytes();
+                
+                // Một chunk bình thường có size khoảng 2,000 - 15,000 bytes.
+                // Nếu vượt quá 60,000 bytes -> 100% là Stash hoặc hệ thống Redstone khổng lồ.
+                if (packetSize > 60000) {
+                    renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+                    return; // Đã tìm thấy, bỏ qua quét block
+                }
+            } catch (Exception ignored) {}
+
+            // [VŨ KHÍ 2]: QUÉT HEURISTIC ĐA LUỒNG
+            final int finalCx = cx, finalCz = cz;
+            EXECUTOR.execute(() -> {
+                try {
+                    Thread.sleep(50); // Chờ server map block vào client
+                    
+                    if (mc.world == null) return;
+                    WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
+                    
+                    if (chunk != null && !chunk.isEmpty()) {
+                        int score = computeSusScore(chunk);
+                        
+                        // Độ nhạy 20 -> Ngưỡng 10 điểm (Cực nhạy)
+                        // Độ nhạy 1  -> Ngưỡng 200 điểm (Chống nhiễu)
+                        int threshold = (21 - sensitivity.get()) * 10;
+
+                        if (score >= threshold) {
+                            renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
+                        }
+                    }
+                } catch (Exception e) {}
+            });
         }
     }
 
-    private void handleChunkData(ChunkDataS2CPacket packet) {
-        int cx = packet.getChunkX();
-        int cz = packet.getChunkZ();
-
-        if (!isWithinSimulationDistance(cx, cz)) return;
-
-        ChunkPos pos = new ChunkPos(cx, cz);
-        long key = pos.toLong();
-
-        if (renderCache.containsKey(key)) return;
-
-        final int finalCx = cx, finalCz = cz;
-        EXECUTOR.execute(() -> {
-            try {
-                // Đợi một chút để chunk kịp load vào thế giới
-                Thread.sleep(50);
-                
-                if (mc.world == null) return;
-                WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
-                
-                if (chunk != null && !chunk.isEmpty()) {
-                    int score = computeSusScore(chunk);
-                    
-                    // Công thức chuyển đổi Độ nhạy (1-20) thành Ngưỡng điểm
-                    // Độ nhạy 20 -> Cần 10 điểm để báo động
-                    // Độ nhạy 1  -> Cần 200 điểm để báo động
-                    int threshold = (21 - sensitivity.get()) * 10;
-
-                    if (score >= threshold) {
-                        renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
-                    }
-                }
-            } catch (Exception e) {}
-        });
-    }
-
     private int computeSusScore(WorldChunk chunk) {
+        // Quét đúng phần Y mà server cấp cho chúng ta (Slicing Bypass)
         int startY = mc.world.getBottomY();
         int endY = mc.world.getBottomY() + mc.world.getHeight() - 1;
         
         int susScore = 0;
         int vineCount = 0;
-        int airCount = 0; 
+        int maxAirInSection = 0; // Đếm không khí theo cụm 16 khối
+        int currentSectionAir = 0;
 
         ChunkPos cp = chunk.getPos();
 
-        for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) {
-                for (int y = startY; y <= endY; y++) {
+        for (int y = startY; y <= endY; y++) {
+            // Reset bộ đếm không khí mỗi khi qua một section mới (16 block Y)
+            if (y % 16 == 0) {
+                if (currentSectionAir > maxAirInSection) maxAirInSection = currentSectionAir;
+                currentSectionAir = 0;
+            }
+
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
                     BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
                     BlockState state = chunk.getBlockState(bp);
                     Block block = state.getBlock();
 
-                    // Đếm lượng không khí để đo kích thước hang động nhân tạo
+                    // Đếm không khí để tìm "Hộp Base" nhân tạo
                     if (block == Blocks.AIR || block == Blocks.CAVE_AIR) {
-                        airCount++;
+                        currentSectionAir++;
                         continue; 
                     }
 
-                    // 1. Đá phiến xoay sai trục (Dấu vết thủ công rất rõ ràng)
+                    // Đá phiến xoay (Heuristic kinh điển)
                     if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
                         if (state.get(Properties.AXIS) != Direction.Axis.Y) {
-                            susScore += 5; // Điểm cao vì tỷ lệ tự nhiên sinh ra rất thấp
+                            susScore += 10; // Cực kỳ bất thường
                         }
                     }
 
-                    // 2. Dấu vết AFK (Thực vật/Khoáng sản max tuổi/size)
+                    // Dấu vết AFK
                     if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
                         if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
-                            susScore += 2; 
+                            susScore += 3; 
                         }
                     }
                     if (filterCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) {
                         if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
-                            susScore += 2;
+                            susScore += 3;
                         }
                     }
                     if (filterAmethyst.get() && block == Blocks.AMETHYST_CLUSTER) {
@@ -196,21 +215,25 @@ public class SusChunkFinder extends Module {
                 }
             }
         }
+        
+        // Cập nhật section cuối cùng
+        if (currentSectionAir > maxAirInSection) maxAirInSection = currentSectionAir;
 
-        // --- CỘNG ĐIỂM DỰA TRÊN QUY MÔ ---
+        // --- TÍNH ĐIỂM QUY MÔ ---
 
-        // Dây leo mọc quá nhiều (Dấu hiệu của base hoặc farm)
-        if (filterVines.get() && vineCount > 50) {
-            susScore += 20;
+        if (filterVines.get() && vineCount > 80) {
+            susScore += 30; // Farm dây leo hoặc tường thành
         }
 
-        // Hầm mỏ nhân tạo khổng lồ / Stash được đào rộng (Air volume)
-        // Một chunk bình thường có khoảng 1000 - 3000 khối không khí ở dưới lòng đất.
-        if (airCount > 8000) {
-            susScore += 50; // Hầm khá lớn
+        // [VŨ KHÍ 3]: KHỐI LƯỢNG KHÔNG KHÍ ĐẶC TÍNH (SECTION DENSITY)
+        // Một section 16x16x16 có tối đa 4096 block.
+        // Hầm tự nhiên hiếm khi có quá 2500 block không khí TRONG MỘT SECTION.
+        // Nếu một vùng 16x16x16 có trên 3000 block không khí -> Có người đã đào rỗng nó (Base 100%).
+        if (maxAirInSection > 3000) {
+            susScore += 50; 
         }
-        if (airCount > 15000) {
-            susScore += 100; // Hầm khổng lồ (Chắc chắn có người đào)
+        if (maxAirInSection > 3800) {
+            susScore += 100; // Trống rỗng hoàn toàn -> Phòng Farm/Stash.
         }
 
         return susScore;
@@ -230,7 +253,7 @@ public class SusChunkFinder extends Module {
 
         pruneDistantChunks();
 
-        // Ép Box chỉ hiển thị ở Y = 50 (dày 0.1 block) giống như một cái thảm đỏ
+        // Ép Box hiển thị ở Y = 50 giống hệt Krypton Client
         double targetY = 50.0;
 
         for (Map.Entry<Long, int[]> entry : renderCache.entrySet()) {
