@@ -2,13 +2,13 @@ package com.nnpg.glazed.modules.esp;
 
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.WorldChunk;
@@ -23,9 +23,9 @@ import net.minecraft.network.PacketByteBuf;
 import com.nnpg.glazed.GlazedAddon;
 
 import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class SusChunkFinder extends Module {
 
@@ -92,24 +92,29 @@ public class SusChunkFinder extends Module {
     );
 
     // ==========================================
-    // HỆ THỐNG LÕI
+    // HỆ THỐNG LÕI (Đã gỡ bỏ Executor đa luồng)
     // ==========================================
 
     private final Map<Long, int[]> renderCache = new ConcurrentHashMap<>();
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
+    private final Queue<ChunkPos> scanQueue = new ConcurrentLinkedQueue<>();
 
-    // Ngưỡng dung lượng gói tin "Tỷ lệ vàng" (65 KB) được ẩn đi
     private static final int PACKET_STASH_THRESHOLD = 65000;
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar đa địa hình tự động hoàn toàn, tích hợp Packet & Palette Sniping.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar đa địa hình, tích hợp Packet, Queue Threading & Palette Sniping.");
     }
 
     @Override
-    public void onActivate() { renderCache.clear(); }
+    public void onActivate() { 
+        renderCache.clear(); 
+        scanQueue.clear();
+    }
 
     @Override
-    public void onDeactivate() { renderCache.clear(); }
+    public void onDeactivate() { 
+        renderCache.clear(); 
+        scanQueue.clear();
+    }
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
@@ -137,142 +142,144 @@ public class SusChunkFinder extends Module {
                 }
             } catch (Exception ignored) {}
 
-            // [VŨ KHÍ 2 & 3]: QUÉT HEURISTIC VÀ PALETTE
-            final int finalCx = cx, finalCz = cz;
-            EXECUTOR.execute(() -> {
-                try {
-                    Thread.sleep(50); 
-                    
-                    if (mc.world == null) return;
-                    WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
-                    
-                    if (chunk != null && !chunk.isEmpty()) {
-                        int score = computeSusScore(chunk);
-                        
-                        int threshold = (21 - sensitivity.get()) * 10;
+            // Đưa vào hàng đợi để chờ Chunk Load an toàn tuyệt đối trên luồng chính
+            scanQueue.add(pos);
+        }
+    }
 
-                        if (score >= threshold) {
-                            renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
-                        }
+    @EventHandler
+    private void onTick(TickEvent.Post event) {
+        if (mc.world == null || mc.player == null) return;
+
+        // Dọn dẹp cache ở đây để chống mù packet khi đi xa
+        pruneDistantChunks();
+
+        // Xử lý tối đa 5 chunk mỗi Tick (100 chunk/giây) để đảm bảo không rớt Base
+        int processed = 0;
+        while (!scanQueue.isEmpty() && processed < 5) {
+            ChunkPos pos = scanQueue.poll();
+            if (pos == null) continue;
+
+            long key = pos.toLong();
+            if (renderCache.containsKey(key)) continue;
+
+            // Đảm bảo chắc chắn 100% chunk đã tồn tại vật lý trong Client World
+            if (mc.world.getChunkManager().isChunkLoaded(pos.x, pos.z)) {
+                WorldChunk chunk = mc.world.getChunk(pos.x, pos.z);
+                if (chunk != null && !chunk.isEmpty()) {
+                    int score = computeSusScore(chunk);
+                    int threshold = (21 - sensitivity.get()) * 10;
+
+                    if (score >= threshold) {
+                        renderCache.put(key, new int[]{ pos.x * 16, pos.z * 16 });
                     }
-                } catch (Exception e) {}
-            });
+                }
+            } else {
+                // Nếu chunk chưa load kịp, nhét lại vào hàng đợi để tick sau kiểm tra lại (KHÔNG BAO GIỜ BỎ LỌT)
+                scanQueue.add(pos);
+            }
+            processed++;
         }
     }
 
     private int computeSusScore(WorldChunk chunk) {
         int susScore = 0;
-
-        // --- PALETTE SNIPER ---
-        if (filterAmethyst.get()) {
-            for (ChunkSection section : chunk.getSectionArray()) {
-                if (section != null && !section.isEmpty()) {
-                    if (section.getBlockStateContainer().hasAny(state -> state.getBlock() == Blocks.AMETHYST_CLUSTER)) {
-                        susScore += 100;
-                        break;
-                    }
-                }
-            }
-        }
-
-        int startY = mc.world.getBottomY();
-        int endY = mc.world.getBottomY() + mc.world.getHeight() - 1;
-        
         int vineCount = 0;
         int maxUndergroundAir = 0; 
-        int currentSectionAir = 0;
+        int artificialBlocks = 0; 
+        int functionalBlocks = 0; 
 
-        // Bộ đếm cho Hệ thống Quét Vật lý Thông minh
-        int artificialBlocks = 0; // Gỗ ván, kính...
-        int functionalBlocks = 0; // Lò nung, Bàn chế tạo, Giường...
+        boolean checkAmethyst = filterAmethyst.get();
 
-        ChunkPos cp = chunk.getPos();
+        for (ChunkSection section : chunk.getSectionArray()) {
+            if (section == null || section.isEmpty()) continue;
 
-        for (int y = startY; y <= endY; y++) {
-            if (y % 16 == 0) {
-                if (y <= 50 && currentSectionAir > maxUndergroundAir) {
-                    maxUndergroundAir = currentSectionAir;
-                }
-                currentSectionAir = 0;
-            }
+            int sectionY = section.getYOffset();
+            boolean checkAir = sectionY < 50;
 
+            // --- PALETTE SNIPER MỞ RỘNG CẤP ĐỘ SECTION ---
+            // Chỉ cần section này có chứa DẤU VẾT KHẢ NGHI, ta mới đào sâu. 
+            // Nếu là núi đá đặc tự nhiên, skip toàn bộ 4096 khối -> Nhanh & Nhạy 100%.
+            boolean hasSusBlocks = section.getBlockStateContainer().hasAny(state -> {
+                Block b = state.getBlock();
+                return b == Blocks.ENDER_CHEST || b == Blocks.ENCHANTING_TABLE || b == Blocks.ANVIL || b == Blocks.BEACON ||
+                       b == Blocks.CRAFTING_TABLE || b == Blocks.FURNACE || b instanceof BedBlock || b == Blocks.BREWING_STAND ||
+                       b == Blocks.OAK_PLANKS || b == Blocks.SPRUCE_PLANKS || b == Blocks.GLASS || b == Blocks.WHITE_CONCRETE || b == Blocks.OBSIDIAN ||
+                       b == Blocks.DEEPSLATE || b == Blocks.VINE || (checkAmethyst && b == Blocks.AMETHYST_CLUSTER) ||
+                       (filterKelp.get() && (b == Blocks.KELP || b == Blocks.KELP_PLANT)) ||
+                       (filterCaveVines.get() && (b == Blocks.CAVE_VINES || b == Blocks.CAVE_VINES_PLANT));
+            });
+
+            // Nếu Palette sạch bóng VÀ không nằm ở độ sâu cần đếm hầm rỗng ngầm -> Bỏ qua section này
+            if (!hasSusBlocks && !checkAir) continue;
+
+            int currentSectionAir = 0;
+
+            // Quét cục bộ section (chạy siêu mượt vì đã được Palette lọc bớt 80% thế giới rác)
             for (int x = 0; x < 16; x++) {
-                for (int z = 0; z < 16; z++) {
-                    BlockPos bp = new BlockPos(cp.getStartX() + x, y, cp.getStartZ() + z);
-                    BlockState state = chunk.getBlockState(bp);
-                    Block block = state.getBlock();
+                for (int y = 0; y < 16; y++) {
+                    for (int z = 0; z < 16; z++) {
+                        BlockState state = section.getBlockState(x, y, z);
+                        Block block = state.getBlock();
 
-                    if (y < 50 && (block == Blocks.AIR || block == Blocks.CAVE_AIR)) {
-                        currentSectionAir++;
-                        continue; 
-                    }
-
-                    // --- [TÍCH HỢP CHÌM] QUÉT BASE VẬT LÝ THÔNG MINH ---
-                    // TIER 1: Khối VIP (Tuyệt đối không có tự nhiên) -> Báo đỏ ngay lập tức
-                    if (block == Blocks.ENDER_CHEST || block == Blocks.ENCHANTING_TABLE || 
-                        block == Blocks.ANVIL || block == Blocks.BEACON) {
-                        susScore += 100; 
-                    }
-                    
-                    // TIER 2: Khối chức năng sinh tồn
-                    else if (block == Blocks.CRAFTING_TABLE || block == Blocks.FURNACE || 
-                             block instanceof BedBlock || block == Blocks.BREWING_STAND) {
-                        functionalBlocks++;
-                    }
-                    
-                    // TIER 3: Khối vật liệu xây dựng
-                    else if (block == Blocks.OAK_PLANKS || block == Blocks.SPRUCE_PLANKS || 
-                             block == Blocks.GLASS || block == Blocks.WHITE_CONCRETE || 
-                             block == Blocks.OBSIDIAN) {
-                        artificialBlocks++;
-                    }
-
-                    // --- HEURISTICS DẤU VẾT ---
-                    if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
-                        if (state.get(Properties.AXIS) != Direction.Axis.Y) {
-                            susScore += 10; 
+                        if (checkAir && (block == Blocks.AIR || block == Blocks.CAVE_AIR)) {
+                            currentSectionAir++;
+                            continue;
                         }
-                    }
 
-                    if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
-                        if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
-                            susScore += 3; 
+                        if (!hasSusBlocks) continue;
+
+                        // TIER 1
+                        if (block == Blocks.ENDER_CHEST || block == Blocks.ENCHANTING_TABLE || 
+                            block == Blocks.ANVIL || block == Blocks.BEACON) {
+                            susScore += 100; 
                         }
-                    }
-                    
-                    if (filterCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) {
-                        if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) {
-                            susScore += 3;
+                        // TIER 2
+                        else if (block == Blocks.CRAFTING_TABLE || block == Blocks.FURNACE || 
+                                 block instanceof BedBlock || block == Blocks.BREWING_STAND) {
+                            functionalBlocks++;
                         }
-                    }
-                    
-                    if (filterVines.get() && block == Blocks.VINE) {
-                        vineCount++;
-                        susScore += 1; 
+                        // TIER 3
+                        else if (block == Blocks.OAK_PLANKS || block == Blocks.SPRUCE_PLANKS || 
+                                 block == Blocks.GLASS || block == Blocks.WHITE_CONCRETE || 
+                                 block == Blocks.OBSIDIAN) {
+                            artificialBlocks++;
+                        }
+
+                        // HEURISTICS DẤU VẾT
+                        if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
+                            if (state.get(Properties.AXIS) != Direction.Axis.Y) susScore += 10; 
+                        }
+                        if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
+                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) susScore += 3; 
+                        }
+                        if (filterCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) {
+                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) susScore += 3;
+                        }
+                        if (filterVines.get() && block == Blocks.VINE) {
+                            vineCount++;
+                            susScore += 1; 
+                        }
+                        if (checkAmethyst && block == Blocks.AMETHYST_CLUSTER) {
+                            susScore += 100;
+                        }
                     }
                 }
             }
+
+            if (checkAir && currentSectionAir > maxUndergroundAir) {
+                maxUndergroundAir = currentSectionAir;
+            }
         }
         
-        // --- CHỐT TỔNG ĐIỂM DỰA TRÊN QUY MÔ VÀ ĐỊA HÌNH ---
-        
-        // Vượt qua bẫy Làng NPC: Làng chỉ có lác đác 1-2 lò nung/giường mỗi chunk.
-        // Base người chơi thường xếp nhiều lò nung sát nhau.
-        if (functionalBlocks >= 4) {
-            susScore += 50; 
-        }
-
-        // Vượt qua bẫy Hầm Mỏ (Mineshaft): 
-        // Hầm mỏ chứa nhiều gỗ ván tự nhiên, nhưng hiếm khi vượt qua 400 khối trong một phạm vi hẹp.
-        if (artificialBlocks > 400) {
-            susScore += 50; 
-        }
-
+        // --- CHỐT TỔNG ĐIỂM NHƯ CŨ ---
+        if (functionalBlocks >= 4) susScore += 50; 
+        if (artificialBlocks > 400) susScore += 50; 
         if (filterVines.get() && vineCount > 80) susScore += 30; 
         
-        // Bắt hầm rỗng ngầm (Air Density Trench)
-        if (maxUndergroundAir > 3000) susScore += 50; 
-        if (maxUndergroundAir > 3800) susScore += 100; 
+        // Cập nhật an toàn: Trench/Hầm chỉ báo đỏ nếu có dấu vết can thiệp nhân tạo (chống hầm cheese tự nhiên)
+        if (maxUndergroundAir > 3000 && (artificialBlocks > 0 || functionalBlocks > 0)) susScore += 50; 
+        if (maxUndergroundAir > 3800 && (artificialBlocks > 0 || functionalBlocks > 0)) susScore += 100; 
 
         return susScore;
     }
@@ -288,8 +295,6 @@ public class SusChunkFinder extends Module {
         int a = alpha.get();
         Color sideColor = new Color(255, 0, 0, a);
         Color lineColor = new Color(255, 0, 0, Math.min(255, a + 80));
-
-        pruneDistantChunks();
 
         double targetY = 50.0;
 
