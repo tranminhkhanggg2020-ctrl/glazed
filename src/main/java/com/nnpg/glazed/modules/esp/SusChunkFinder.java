@@ -100,7 +100,6 @@ public class SusChunkFinder extends Module {
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
 
     private static final int PACKET_STASH_THRESHOLD = 65000;
-    private static final int BLOCK_ENTITY_STASH_THRESHOLD = 40; 
 
     public SusChunkFinder() {
         super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar đa địa hình tự động hoàn toàn, tích hợp Packet & Palette Sniping.");
@@ -127,15 +126,13 @@ public class SusChunkFinder extends Module {
 
             if (renderCache.containsKey(key)) return;
 
-            // [VŨ KHÍ 1 TỐI ƯU]: QUÉT DUNG LƯỢNG VÀ SỐ LƯỢNG BLOCK ENTITY
+            // [VŨ KHÍ 1 TỐI ƯU]: QUÉT DUNG LƯỢNG MẠNG (Đã được làm sạch Mapping)
             try {
                 PacketByteBuf buf = packet.getChunkData().getSectionsDataBuf();
                 int packetSize = buf.readableBytes();
                 
-                // FIX LỖI 1: Gọi thẳng danh sách Block Entities từ packet gốc
-                int blockEntityCount = packet.getBlockEntityData().size();
-                
-                if (packetSize > PACKET_STASH_THRESHOLD || blockEntityCount >= BLOCK_ENTITY_STASH_THRESHOLD) {
+                // Cực kỳ gọn nhẹ và hiệu quả: Gói tin càng nặng, càng nhiều đồ
+                if (packetSize > PACKET_STASH_THRESHOLD) {
                     renderCache.put(key, new int[]{ cx * 16, cz * 16 });
                     return; 
                 }
