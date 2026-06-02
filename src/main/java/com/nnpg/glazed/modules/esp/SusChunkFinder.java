@@ -100,7 +100,7 @@ public class SusChunkFinder extends Module {
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
 
     private static final int PACKET_STASH_THRESHOLD = 65000;
-    private static final int BLOCK_ENTITY_STASH_THRESHOLD = 40; // Ngưỡng bắt stash xịn
+    private static final int BLOCK_ENTITY_STASH_THRESHOLD = 40; 
 
     public SusChunkFinder() {
         super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar đa địa hình tự động hoàn toàn, tích hợp Packet & Palette Sniping.");
@@ -129,12 +129,11 @@ public class SusChunkFinder extends Module {
 
             // [VŨ KHÍ 1 TỐI ƯU]: QUÉT DUNG LƯỢNG VÀ SỐ LƯỢNG BLOCK ENTITY
             try {
-                // Check 1: NBT Data size (Mảnh ghép thô)
                 PacketByteBuf buf = packet.getChunkData().getSectionsDataBuf();
                 int packetSize = buf.readableBytes();
                 
-                // Check 2: Đếm số lượng NBT/Block Entities chính xác (Rương, Shulker, Lò nung, v.v)
-                int blockEntityCount = packet.getChunkData().getBlockEntities().size();
+                // FIX LỖI 1: Gọi thẳng danh sách Block Entities từ packet gốc
+                int blockEntityCount = packet.getBlockEntityData().size();
                 
                 if (packetSize > PACKET_STASH_THRESHOLD || blockEntityCount >= BLOCK_ENTITY_STASH_THRESHOLD) {
                     renderCache.put(key, new int[]{ cx * 16, cz * 16 });
@@ -173,21 +172,24 @@ public class SusChunkFinder extends Module {
         int functionalBlocks = 0;
 
         ChunkPos cp = chunk.getPos();
+        ChunkSection[] sections = chunk.getSectionArray();
 
-        for (ChunkSection section : chunk.getSectionArray()) {
+        // FIX LỖI 2: Duyệt mảng bằng index để tự tính toán độ cao Y chuẩn xác
+        for (int i = 0; i < sections.length; i++) {
+            ChunkSection section = sections[i];
             if (section == null || section.isEmpty()) continue;
 
             PalettedContainer<BlockState> container = section.getBlockStateContainer();
-            int sectionY = section.getYOffset();
+            
+            // Tính toán độ cao Y của Section dựa trên Index (Tối ưu tuyệt đối)
+            int sectionY = (chunk.getBottomSectionCoord() + i) * 16;
 
             // --- PALETTE SNIPER (FAST-FAIL) ---
             
-            // 1. Quét Amethyst (Insta-flag)
             if (filterAmethyst.get() && container.hasAny(state -> state.getBlock() == Blocks.AMETHYST_CLUSTER)) {
                 susScore += 100;
             }
 
-            // 2. TIER 1: Khối VIP (Tuyệt đối không có tự nhiên)
             if (container.hasAny(state -> {
                 Block b = state.getBlock();
                 return b == Blocks.ENDER_CHEST || b == Blocks.ENCHANTING_TABLE || b == Blocks.ANVIL || b == Blocks.BEACON;
@@ -195,7 +197,6 @@ public class SusChunkFinder extends Module {
                 susScore += 100; 
             }
 
-            // 3. TIER 2 & TIER 3 & Heuristics: CHỈ CHẠY VÒNG LẶP NẾU PALETTE XÁC NHẬN CÓ SỰ TỒN TẠI
             boolean hasTier2 = container.hasAny(state -> {
                 Block b = state.getBlock();
                 return b == Blocks.CRAFTING_TABLE || b == Blocks.FURNACE || b instanceof BedBlock || b == Blocks.BREWING_STAND;
@@ -217,7 +218,6 @@ public class SusChunkFinder extends Module {
             boolean isUnderground = sectionY < 50;
             int currentSectionAir = 0;
 
-            // NẾU section có khối tình nghi, HOẶC đang ở dưới lòng đất để đếm khí, ta mới quét cục bộ 16x16x16
             if (hasTier2 || hasTier3 || hasHeuristics || isUnderground) {
                 for (int x = 0; x < 16; x++) {
                     for (int y = 0; y < 16; y++) {
@@ -227,23 +227,19 @@ public class SusChunkFinder extends Module {
                             BlockState state = chunk.getBlockState(bp);
                             Block block = state.getBlock();
 
-                            // Quét Air cho Hầm ngầm
                             if (isUnderground && (block == Blocks.AIR || block == Blocks.CAVE_AIR)) {
                                 currentSectionAir++;
                                 continue;
                             }
 
-                            // Quét đếm Tier 2
                             if (hasTier2 && (block == Blocks.CRAFTING_TABLE || block == Blocks.FURNACE || block instanceof BedBlock || block == Blocks.BREWING_STAND)) {
                                 functionalBlocks++;
                             }
                             
-                            // Quét đếm Tier 3
                             if (hasTier3 && (block == Blocks.OAK_PLANKS || block == Blocks.SPRUCE_PLANKS || block == Blocks.GLASS || block == Blocks.WHITE_CONCRETE || block == Blocks.OBSIDIAN)) {
                                 artificialBlocks++;
                             }
 
-                            // --- HEURISTICS DẤU VẾT ---
                             if (hasHeuristics) {
                                 if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
                                     if (state.get(Properties.AXIS) != Direction.Axis.Y) susScore += 10; 
@@ -272,12 +268,10 @@ public class SusChunkFinder extends Module {
             }
         }
         
-        // --- CHỐT TỔNG ĐIỂM DỰA TRÊN QUY MÔ VÀ ĐỊA HÌNH ---
         if (functionalBlocks >= 4) susScore += 50; 
         if (artificialBlocks > 400) susScore += 50; 
         if (filterVines.get() && vineCount > 80) susScore += 30; 
         
-        // Bắt hầm rỗng ngầm (Air Density Trench)
         if (maxUndergroundAir > 3000) susScore += 50; 
         if (maxUndergroundAir > 3800) susScore += 100; 
 
