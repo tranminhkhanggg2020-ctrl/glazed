@@ -22,6 +22,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.state.property.Properties;
+import net.minecraft.block.entity.BlockEntityType;
 
 import com.nnpg.glazed.GlazedAddon;
 
@@ -82,12 +83,11 @@ public class SusChunkFinder extends Module {
     private final Map<Long, ChunkPos> baseCache = new ConcurrentHashMap<>();
     private final Set<Long> newChunkCache = ConcurrentHashMap.newKeySet(); 
     
-    // BỘ NHỚ ĐỆM TÍCH LŨY: Lưu trữ điểm số ngầm, không bị xóa ngay cả khi bay xa
     private final Map<Long, Integer> chunkSusScores = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Tích lũy Packet đa luồng & Phân tích Rương Ngầm. Xóa bỏ giới hạn Ping.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Hệ thống Trọng số chống nhiễu Tự Nhiên & Tích lũy Packet đa luồng.");
     }
 
     @Override
@@ -105,14 +105,14 @@ public class SusChunkFinder extends Module {
     }
 
     // ==========================================
-    // TẦNG MẠNG (KHÔNG CÓ GIỚI HẠN KHOẢNG CÁCH)
+    // TẦNG MẠNG (TÍCH HỢP HỆ THỐNG TRỌNG SỐ)
     // ==========================================
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // 1. CHỐNG BÁO ĐỘNG GIẢ (Bắt Đất Mới)
+        // 1. CHỐNG BÁO ĐỘNG GIẢ ĐẤT MỚI
         if (event.packet instanceof BlockUpdateS2CPacket updatePacket) {
             BlockState state = updatePacket.getState();
             if (!state.getFluidState().isEmpty()) {
@@ -122,7 +122,7 @@ public class SusChunkFinder extends Module {
             }
         }
 
-        // 2. KRYPTON BLOCK-ENTITY LEAK SNIPER
+        // 2. KRYPTON WEIGHTED SNIPER (HỆ THỐNG TRỌNG SỐ)
         if (event.packet instanceof ChunkDataS2CPacket chunkPacket) {
             int cx = chunkPacket.getChunkX();
             int cz = chunkPacket.getChunkZ();
@@ -131,37 +131,53 @@ public class SusChunkFinder extends Module {
             if (baseCache.containsKey(key)) return;
 
             try {
-                int[] counter = {0};
+                int[] scoreCounter = {0};
                 chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
-                    counter[0]++;
+                    // Đánh giá điểm theo từng loại BlockEntity
+                    if (bType == BlockEntityType.SHULKER_BOX || bType == BlockEntityType.ENDER_CHEST) {
+                        scoreCounter[0] += 50; // 100% của người chơi
+                    } 
+                    else if (bType == BlockEntityType.HOPPER) {
+                        scoreCounter[0] += 10; // Đồ redstone
+                    } 
+                    else if (bType == BlockEntityType.CHEST || bType == BlockEntityType.BARREL || bType == BlockEntityType.TRAPPED_CHEST) {
+                        scoreCounter[0] += 2; // Rương gỗ (Có thể của tự nhiên, cho điểm thấp)
+                    } 
+                    else if (bType == BlockEntityType.FURNACE || bType == BlockEntityType.SMOKER || bType == BlockEntityType.BLAST_FURNACE) {
+                        scoreCounter[0] += 2;
+                    } 
+                    // CHỐNG NHIỄU TỰ NHIÊN: Gặp Lồng Tỷ Phú hoặc Chuông Làng là phạt điểm kịch khung
+                    else if (bType == BlockEntityType.SPAWNER) {
+                        scoreCounter[0] -= 100; // Khóa mỏm Hang Nhện/Hầm mỏ
+                    } 
+                    else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) {
+                        scoreCounter[0] -= 50; // Khóa mỏm Làng Mạc
+                    }
                 });
                 
-                if (counter[0] > 0) {
-                    // Cú đấm thép: Mỗi rương ngầm = 10 điểm. 
-                    // Sens 5 (cần 90 điểm) -> 9 cái rương là kích hoạt Base ngay lập tức.
-                    addSusScore(cx, cz, counter[0] * 10);
+                // Chỉ cộng điểm khi tổng trọng số dương (Đã bù trừ xong tự nhiên)
+                if (scoreCounter[0] > 0) {
+                    addSusScore(cx, cz, scoreCounter[0]);
                 }
             } catch (Exception ignored) {}
 
-            // Chạy kiểm tra khối phụ trợ (Chỉ chạy trên Chunk Cũ)
             runHeuristicScan(cx, cz, key);
         }
 
-        // 3. THỰC THỂ LẠ (Xe mỏ rương, Khung vật phẩm)
+        // 3. THỰC THỂ LẠ (Đã xóa Chest Minecart để chống nhiễu Hầm mỏ tự nhiên)
         else if (event.packet instanceof EntitySpawnS2CPacket spawnPacket) {
             EntityType<?> type = spawnPacket.getEntityType();
-            if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || 
-                type == EntityType.CHEST_MINECART || type == EntityType.ARMOR_STAND) {
+            if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || type == EntityType.ARMOR_STAND) {
                 int cx = ((int) spawnPacket.getX()) >> 4;
                 int cz = ((int) spawnPacket.getZ()) >> 4;
-                addSusScore(cx, cz, 40); // Điểm nghi ngờ cực mạnh
+                addSusScore(cx, cz, 40); 
             }
         }
 
-        // 4. BỘ HÚT MICRO-PACKETS (Redstone, Lò nung cập nhật lẻ tẻ)
+        // 4. MICRO-PACKETS
         else if (event.packet instanceof BlockEntityUpdateS2CPacket updatePacket) {
             BlockPos bPos = updatePacket.getPos();
-            addSusScore(bPos.getX() >> 4, bPos.getZ() >> 4, 15); // Lò nung đang cháy = +15 điểm/lần
+            addSusScore(bPos.getX() >> 4, bPos.getZ() >> 4, 15); 
         }
     }
 
@@ -173,16 +189,14 @@ public class SusChunkFinder extends Module {
         long key = ChunkPos.toLong(cx, cz);
         if (baseCache.containsKey(key)) return;
 
-        // Tích lũy điểm vào bộ nhớ đệm
         int currentScore = chunkSusScores.getOrDefault(key, 0) + amount;
         chunkSusScores.put(key, currentScore);
 
-        // Công thức tính Ngưỡng: Sens càng cao, điểm cần thiết càng ít
         int threshold = (11 - sensitivity.get()) * 15; 
         
         if (currentScore >= threshold) {
             baseCache.put(key, new ChunkPos(cx, cz));
-            chunkSusScores.remove(key); // Xóa khỏi bộ nhớ đệm khi đã thành Base
+            chunkSusScores.remove(key); 
         }
     }
 
@@ -202,7 +216,6 @@ public class SusChunkFinder extends Module {
             if (chunk != null && !chunk.isEmpty()) {
                 EXECUTOR.execute(() -> {
                     try {
-                        // KHIẾN BÁO ĐỘNG GIẢ BẰNG 0: Chỉ quét nếu đây là Đất Cũ
                         if (newChunkCache.contains(key)) return; 
 
                         int blockScore = 0;
@@ -249,7 +262,7 @@ public class SusChunkFinder extends Module {
                         }
 
                         if (blockScore > 0) {
-                            addSusScore(cx, cz, blockScore + 30); // Bơm điểm vào Accumulator
+                            addSusScore(cx, cz, blockScore + 30); 
                         }
                     } catch (Exception ignored) {}
                 });
@@ -278,7 +291,6 @@ public class SusChunkFinder extends Module {
         int maxDist = renderDistance.get();
 
         for (ChunkPos pos : baseCache.values()) {
-            // Chỉ VẼ những thảm ở gần để tránh lag FPS
             if (Math.abs(pos.x - pCx) <= maxDist && Math.abs(pos.z - pCz) <= maxDist) {
                 int bx = pos.getStartX();
                 int bz = pos.getStartZ();
@@ -293,13 +305,11 @@ public class SusChunkFinder extends Module {
         }
     }
 
-    // Dọn dẹp RAM cực kỳ hào phóng (Cho phép lưu trữ dữ liệu rất xa)
     private void pruneCaches() {
         if (mc.player == null) return;
         int pCx = mc.player.getChunkPos().x;
         int pCz = mc.player.getChunkPos().z;
         
-        // Cho phép lưu Base ở khoảng cách lên tới 50 chunk (Gần 1000 blocks)
         int killDistance = 50; 
 
         baseCache.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
