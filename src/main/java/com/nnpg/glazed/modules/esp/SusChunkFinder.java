@@ -2,7 +2,6 @@ package com.nnpg.glazed.modules.esp;
 
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -53,15 +52,15 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> renderDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("render-distance")
-            .description("Bán kính VẼ thảm đỏ (Tối ưu Render).")
-            .defaultValue(6).min(1).max(16).sliderRange(1, 16)
+            .description("Bán kính VẼ thảm đỏ (Đã mở khóa lên 64 Chunk / 1024 Blocks).")
+            .defaultValue(16).min(1).max(64).sliderRange(1, 64)
             .build()
     );
 
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Độ nhạy Krypton (1 = Khó, 10 = Cực Nhạy).")
+            .description("Độ nhạy (1 = Khó, 10 = Cực Nhạy).")
             .defaultValue(6).min(1).max(10).sliderRange(1, 10)
             .build()
     );
@@ -75,7 +74,7 @@ public class SusChunkFinder extends Module {
     );
 
     // ==========================================
-    // BỘ LỌC HEURISTIC (Phụ trợ)
+    // BỘ LỌC HEURISTIC
     // ==========================================
     
     private final Setting<Boolean> filterAmethyst = sgGeneral.add(new BoolSetting.Builder().name("amethyst").defaultValue(true).build());
@@ -87,20 +86,18 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> filterBamboo = sgGeneral.add(new BoolSetting.Builder().name("bamboo").defaultValue(false).build());
 
     // ==========================================
-    // KRYPTON CACHE & THREADING
+    // KRYPTON CACHE (VÔ HẠN BỘ NHỚ) & 8-CORE THREADING
     // ==========================================
 
     private final Map<Long, ChunkPos> baseCache = new ConcurrentHashMap<>();
     private final Set<Long> newChunkCache = ConcurrentHashMap.newKeySet(); 
     private final Map<Long, Integer> chunkSusScores = new ConcurrentHashMap<>();
     
-    // Động cơ 4 luồng mạnh mẽ
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
-    
-    private int pruneTimer = 0;
+    // ÉP XUNG CPU: 8 Luồng để nhai nuốt Packet tức thời
+    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(8);
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Động cơ 2 Lớp (Cân Packet + Trọng Số). Miễn nhiễm Làng Mạc & Hầm Mỏ.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton Extreme: Ép xung 8 Luồng & Vô hạn bộ nhớ (Tắt đi bật lại nếu tụt FPS).");
     }
 
     @Override
@@ -108,7 +105,6 @@ public class SusChunkFinder extends Module {
         baseCache.clear(); 
         newChunkCache.clear();
         chunkSusScores.clear();
-        pruneTimer = 0;
     }
 
     @Override
@@ -155,24 +151,21 @@ public class SusChunkFinder extends Module {
             try {
                 int[] scoreCounter = {0};
                 chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
-                    // Cộng điểm đồ nhân tạo
                     if (bType == BlockEntityType.SHULKER_BOX || bType == BlockEntityType.ENDER_CHEST) scoreCounter[0] += 50; 
                     else if (bType == BlockEntityType.HOPPER) scoreCounter[0] += 10; 
                     else if (bType == BlockEntityType.CHEST || bType == BlockEntityType.BARREL || bType == BlockEntityType.TRAPPED_CHEST) scoreCounter[0] += 2; 
                     else if (bType == BlockEntityType.FURNACE || bType == BlockEntityType.SMOKER || bType == BlockEntityType.BLAST_FURNACE) scoreCounter[0] += 2;
                     
-                    // Phạt âm điểm tự nhiên
-                    else if (bType == BlockEntityType.MOB_SPAWNER) scoreCounter[0] -= 100; // Hầm mỏ / Hang nhện
-                    else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) scoreCounter[0] -= 50; // Làng
-                    else if (bType == BlockEntityType.BED) scoreCounter[0] -= 10; // Làng / Nhà dân
+                    else if (bType == BlockEntityType.MOB_SPAWNER) scoreCounter[0] -= 100; 
+                    else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) scoreCounter[0] -= 50; 
+                    else if (bType == BlockEntityType.BED) scoreCounter[0] -= 10; 
                 });
                 
-                if (scoreCounter[0] != 0) { // Cả âm lẫn dương đều được nạp vào bộ nhớ để cân bằng
+                if (scoreCounter[0] != 0) { 
                     addSusScore(cx, cz, scoreCounter[0]);
                 }
             } catch (Exception ignored) {}
 
-            // Đẩy việc quét block (Heuristic) xuống Background
             runHeuristicScan(cx, cz, key);
         }
 
@@ -184,7 +177,6 @@ public class SusChunkFinder extends Module {
             if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || type == EntityType.ARMOR_STAND) {
                 addSusScore(cx, cz, 40); 
             }
-            // Khắc tinh của Làng: Dân làng & Golem sẽ tự dập tắt báo động
             else if (type == EntityType.VILLAGER || type == EntityType.IRON_GOLEM) {
                 addSusScore(cx, cz, -20);
             }
@@ -223,7 +215,7 @@ public class SusChunkFinder extends Module {
             try {
                 if (newChunkCache.contains(key)) return; 
                 
-                Thread.sleep(20);
+                Thread.sleep(10); // Giảm độ trễ chờ đợi để tối ưu tốc độ vọt
                 if (mc.world == null) return;
                 
                 WorldChunk chunk = mc.world.getChunk(cx, cz);
@@ -279,36 +271,7 @@ public class SusChunkFinder extends Module {
     }
 
     // ==========================================
-    // TỐI ƯU HÓA FPS: CHU KỲ DỌN RÁC
-    // ==========================================
-
-    @EventHandler
-    private void onTick(TickEvent.Post event) {
-        pruneTimer++;
-        if (pruneTimer >= 20) { // Chạy dọn rác 1 lần mỗi giây
-            pruneCaches();
-            pruneTimer = 0;
-        }
-    }
-
-    private void pruneCaches() {
-        if (mc.player == null) return;
-        int pCx = mc.player.getChunkPos().x;
-        int pCz = mc.player.getChunkPos().z;
-        int killDistance = 50; 
-
-        baseCache.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
-        newChunkCache.removeIf(key -> isTooFar(key, pCx, pCz, killDistance));
-        chunkSusScores.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
-    }
-
-    private boolean isTooFar(long key, int pCx, int pCz, int dist) {
-        ChunkPos cp = new ChunkPos(key);
-        return Math.abs(cp.x - pCx) > dist || Math.abs(cp.z - pCz) > dist;
-    }
-
-    // ==========================================
-    // VẼ ĐỒ HỌA (Mượt mà)
+    // VẼ ĐỒ HỌA (KRYPTON RED CARPET)
     // ==========================================
 
     @EventHandler
