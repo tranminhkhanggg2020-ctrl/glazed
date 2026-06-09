@@ -23,6 +23,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.state.property.Properties;
 import net.minecraft.block.entity.BlockEntityType;
+import net.minecraft.network.PacketByteBuf;
 
 import com.nnpg.glazed.GlazedAddon;
 
@@ -39,6 +40,14 @@ public class SusChunkFinder extends Module {
     // ==========================================
     // CÀI ĐẶT RADAR
     // ==========================================
+
+    private final Setting<Integer> stashThreshold = sgGeneral.add(
+        new IntSetting.Builder()
+            .name("stash-packet-threshold")
+            .description("Ngưỡng dung lượng (Bytes). Vượt mức này = 100% Base (Bypass mọi Anti-Xray).")
+            .defaultValue(45000).min(10000).max(100000).sliderRange(20000, 80000)
+            .build()
+    );
 
     private final Setting<Integer> renderDistance = sgGeneral.add(
         new IntSetting.Builder()
@@ -87,7 +96,7 @@ public class SusChunkFinder extends Module {
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Hệ thống Trọng số chống nhiễu Tự Nhiên & Tích lũy Packet đa luồng.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Đo dung lượng Packet thô & Chấm điểm Trọng số đa luồng.");
     }
 
     @Override
@@ -105,7 +114,7 @@ public class SusChunkFinder extends Module {
     }
 
     // ==========================================
-    // TẦNG MẠNG (TÍCH HỢP HỆ THỐNG TRỌNG SỐ)
+    // TẦNG MẠNG
     // ==========================================
 
     @EventHandler
@@ -122,7 +131,7 @@ public class SusChunkFinder extends Module {
             }
         }
 
-        // 2. KRYPTON WEIGHTED SNIPER (HỆ THỐNG TRỌNG SỐ)
+        // 2. KRYPTON DUAL-CORE SNIPER
         if (event.packet instanceof ChunkDataS2CPacket chunkPacket) {
             int cx = chunkPacket.getChunkX();
             int cz = chunkPacket.getChunkZ();
@@ -130,32 +139,40 @@ public class SusChunkFinder extends Module {
 
             if (baseCache.containsKey(key)) return;
 
+            // [LỚP 1]: TRẠM CÂN TẢI TRỌNG (Đo dung lượng Packet thô)
+            try {
+                PacketByteBuf buf = chunkPacket.getChunkData().getSectionsDataBuf();
+                if (buf != null && buf.readableBytes() > stashThreshold.get()) {
+                    baseCache.put(key, new ChunkPos(cx, cz));
+                    return; // Quá nặng -> 100% là kho đồ, bỏ qua các bước kiểm tra khác
+                }
+            } catch (Exception ignored) {}
+
+            // [LỚP 2]: HỆ THỐNG TRỌNG SỐ (Đếm thực thể ngầm và bù trừ tự nhiên)
             try {
                 int[] scoreCounter = {0};
                 chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
-                    // Đánh giá điểm theo từng loại BlockEntity
                     if (bType == BlockEntityType.SHULKER_BOX || bType == BlockEntityType.ENDER_CHEST) {
-                        scoreCounter[0] += 50; // 100% của người chơi
+                        scoreCounter[0] += 50; 
                     } 
                     else if (bType == BlockEntityType.HOPPER) {
-                        scoreCounter[0] += 10; // Đồ redstone
+                        scoreCounter[0] += 10; 
                     } 
                     else if (bType == BlockEntityType.CHEST || bType == BlockEntityType.BARREL || bType == BlockEntityType.TRAPPED_CHEST) {
-                        scoreCounter[0] += 2; // Rương gỗ (Có thể của tự nhiên, cho điểm thấp)
+                        scoreCounter[0] += 2; 
                     } 
                     else if (bType == BlockEntityType.FURNACE || bType == BlockEntityType.SMOKER || bType == BlockEntityType.BLAST_FURNACE) {
                         scoreCounter[0] += 2;
                     } 
-                    // CHỐNG NHIỄU TỰ NHIÊN: Gặp Lồng Tỷ Phú hoặc Chuông Làng là phạt điểm kịch khung
+                    // Phạt điểm khối tự nhiên
                     else if (bType == BlockEntityType.MOB_SPAWNER) {
-                        scoreCounter[0] -= 100; // Khóa mỏm Hang Nhện/Hầm mỏ
+                        scoreCounter[0] -= 100; 
                     } 
                     else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) {
-                        scoreCounter[0] -= 50; // Khóa mỏm Làng Mạc
+                        scoreCounter[0] -= 50; 
                     }
                 });
                 
-                // Chỉ cộng điểm khi tổng trọng số dương (Đã bù trừ xong tự nhiên)
                 if (scoreCounter[0] > 0) {
                     addSusScore(cx, cz, scoreCounter[0]);
                 }
@@ -164,7 +181,7 @@ public class SusChunkFinder extends Module {
             runHeuristicScan(cx, cz, key);
         }
 
-        // 3. THỰC THỂ LẠ (Đã xóa Chest Minecart để chống nhiễu Hầm mỏ tự nhiên)
+        // 3. THỰC THỂ LẠ
         else if (event.packet instanceof EntitySpawnS2CPacket spawnPacket) {
             EntityType<?> type = spawnPacket.getEntityType();
             if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || type == EntityType.ARMOR_STAND) {
