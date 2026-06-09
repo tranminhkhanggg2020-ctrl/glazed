@@ -5,8 +5,8 @@ import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.render.color.Color; // Đã thêm import Color
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.util.math.BlockPos;
@@ -30,10 +30,6 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 
 import java.util.concurrent.*;
 
-/**
- * SusChunkFinder — Hệ thống radar săn base đa lớp tối ưu bằng cấu trúc dữ liệu FastUtil.
- * Thiết kế kiến trúc bởi Claude AI & Tối ưu hóa thuật toán bởi Glazed Ecosystem.
- */
 public class SusChunkFinder extends Module {
 
     // -------------------------------------------------------------------------
@@ -126,8 +122,9 @@ public class SusChunkFinder extends Module {
     // -------------------------------------------------------------------------
 
     private void handleChunkData(ChunkDataS2CPacket packet) {
-        int cx = packet.getX();
-        int cz = packet.getZ();
+        // ĐÃ FIX LỖI: Sử dụng getChunkX() và getChunkZ() thay vì getX() / getZ()
+        int cx = packet.getChunkX();
+        int cz = packet.getChunkZ();
         long key = chunkKey(cx, cz);
 
         if (confirmedBases.containsKey(key)) return;
@@ -219,7 +216,7 @@ public class SusChunkFinder extends Module {
 
     private void handleBlockUpdate(BlockUpdateS2CPacket packet) {
         var state = packet.getState();
-        if (!state.getFluidState().isEmpty()) { // Nhận diện dòng chảy thông minh hơn cách check thủ công của Claude
+        if (!state.getFluidState().isEmpty()) { 
             BlockPos pos = packet.getPos();
             long key = chunkKey(pos.getX() >> 4, pos.getZ() >> 4);
             synchronized (freshLock) { freshChunks.add(key); }
@@ -282,7 +279,7 @@ public class SusChunkFinder extends Module {
 
         var keys = confirmedBases.keySet();
         SettingColor color = colorBase.get();
-        Color lineColor = new Color(color.r, color.g, color.b, 255); // Khóa nét viền 100% alpha cực nét
+        Color lineColor = new Color(color.r, color.g, color.b, 255); // ĐÃ FIX LỖI: nhận diện class Color bình thường
 
         for (long key : keys) {
             int cx = (int)(key >> 32);
