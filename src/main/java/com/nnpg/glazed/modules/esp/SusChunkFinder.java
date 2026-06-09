@@ -135,9 +135,12 @@ public class SusChunkFinder extends Module {
             if (renderCache.containsKey(key)) return;
 
             try {
-                // Đếm trực tiếp BlockEntity bị giấu (Rương, Lò nung, v.v.)
-                List<?> blockEntities = chunkPacket.getChunkData().getBlockEntities(cx, cz);
-                int beCount = (blockEntities != null) ? blockEntities.size() : 0;
+                // Đếm trực tiếp BlockEntity bị giấu bằng Visitor Pattern (Chuẩn Krypton)
+int[] counter = {0};
+chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
+    counter[0]++;
+});
+int beCount = counter[0];
 
                 // Công thức tính ngưỡng linh động theo Sensitivity của bạn (VD: Sens 3 -> Cần ~80 Entities)
                 int threshold = (11 - sensitivity.get()) * 10; 
