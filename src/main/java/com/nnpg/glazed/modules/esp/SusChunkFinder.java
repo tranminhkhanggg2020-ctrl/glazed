@@ -134,8 +134,7 @@ public class SusChunkFinder extends Module {
                 
                 if (packetSize > PACKET_STASH_THRESHOLD) {
                     // Tô đỏ toàn bộ cột Chunk từ đáy lên đỉnh vì không rõ Y
-                    renderCache.put(key, new int[]{ cx * 16, mc.world.getBottomY(), cz * 16, mc.world.getTopY() });
-                    return; 
+            renderCache.put(key, new int[]{ cx * 16, mc.world.getBottomY(), cz * 16, mc.world.getBottomY() + mc.world.getHeight() }); return; 
                 }
             } catch (Exception ignored) {}
 
@@ -169,8 +168,7 @@ public class SusChunkFinder extends Module {
         int totalSusScore = 0;
         int highestSectionScore = 0;
         int bestMinY = mc.world.getBottomY();
-        int bestMaxY = mc.world.getTopY();
-        
+        int bestMaxY = mc.world.getBottomY() + mc.world.getHeight();        
         int vineCount = 0;
         int maxUndergroundAir = 0; 
         int artificialBlocks = 0;
