@@ -136,7 +136,7 @@ public class SusChunkFinder extends Module {
 
             try {
                 // Đếm trực tiếp BlockEntity bị giấu (Rương, Lò nung, v.v.)
-                List<?> blockEntities = chunkPacket.getBlockEntities();
+                List<?> blockEntities = chunkPacket.getChunkData().getBlockEntities();
                 int beCount = (blockEntities != null) ? blockEntities.size() : 0;
 
                 // Công thức tính ngưỡng linh động theo Sensitivity của bạn (VD: Sens 3 -> Cần ~80 Entities)
