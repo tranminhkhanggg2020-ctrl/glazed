@@ -57,7 +57,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> alpha = sgRender.add(
         new IntSetting.Builder()
             .name("alpha")
-            .description("Độ trong suốt của thảm màu đỏ.")
+            .description("Độ trong suốt của khung màu đỏ.")
             .defaultValue(52).min(0).max(255).sliderRange(0, 255)
             .build()
     );
@@ -96,6 +96,7 @@ public class SusChunkFinder extends Module {
     // HỆ THỐNG LÕI
     // ==========================================
 
+    // Mảng int[] lưu: {startX, minY, startZ, maxY}
     private final Map<Long, int[]> renderCache = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
 
@@ -126,42 +127,49 @@ public class SusChunkFinder extends Module {
 
             if (renderCache.containsKey(key)) return;
 
-            // [VŨ KHÍ 1 TỐI ƯU]: QUÉT DUNG LƯỢNG MẠNG (Đã được làm sạch Mapping)
+            // [VŨ KHÍ 1]: QUÉT DUNG LƯỢNG MẠNG
             try {
                 PacketByteBuf buf = packet.getChunkData().getSectionsDataBuf();
                 int packetSize = buf.readableBytes();
                 
-                // Cực kỳ gọn nhẹ và hiệu quả: Gói tin càng nặng, càng nhiều đồ
                 if (packetSize > PACKET_STASH_THRESHOLD) {
-                    renderCache.put(key, new int[]{ cx * 16, cz * 16 });
+                    // Tô đỏ toàn bộ cột Chunk từ đáy lên đỉnh vì không rõ Y
+                    renderCache.put(key, new int[]{ cx * 16, mc.world.getBottomY(), cz * 16, mc.world.getTopY() });
                     return; 
                 }
             } catch (Exception ignored) {}
 
-            // [VŨ KHÍ 2 & 3]: HEURISTIC VÀ PALETTE TỐI ƯU HÓA ĐA LUỒNG
+            // [VŨ KHÍ 2 & 3]: HEURISTIC VÀ PALETTE
             final int finalCx = cx, finalCz = cz;
-            EXECUTOR.execute(() -> {
-                try {
-                    Thread.sleep(50); 
-                    
-                    if (mc.world == null) return;
-                    WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
-                    
-                    if (chunk != null && !chunk.isEmpty()) {
-                        int score = computeSusScore(chunk);
-                        int threshold = (21 - sensitivity.get()) * 10;
+            
+            // Xử lý Thread-Safe: Lấy Chunk trên Main Thread trước
+            mc.execute(() -> {
+                if (mc.world == null) return;
+                WorldChunk chunk = mc.world.getChunk(finalCx, finalCz);
+                
+                if (chunk != null && !chunk.isEmpty()) {
+                    EXECUTOR.execute(() -> {
+                        try {
+                            // Struct trả về: [0] = Score, [1] = Target Min Y, [2] = Target Max Y
+                            int[] result = computeSusScore(chunk);
+                            int score = result[0];
+                            int threshold = (21 - sensitivity.get()) * 10;
 
-                        if (score >= threshold) {
-                            renderCache.put(key, new int[]{ finalCx * 16, finalCz * 16 });
-                        }
-                    }
-                } catch (Exception e) {}
+                            if (score >= threshold) {
+                                renderCache.put(key, new int[]{ finalCx * 16, result[1], finalCz * 16, result[2] });
+                            }
+                        } catch (Exception ignored) {}
+                    });
+                }
             });
         }
     }
 
-    private int computeSusScore(WorldChunk chunk) {
-        int susScore = 0;
+    private int[] computeSusScore(WorldChunk chunk) {
+        int totalSusScore = 0;
+        int highestSectionScore = 0;
+        int bestMinY = mc.world.getBottomY();
+        int bestMaxY = mc.world.getTopY();
         
         int vineCount = 0;
         int maxUndergroundAir = 0; 
@@ -171,27 +179,26 @@ public class SusChunkFinder extends Module {
         ChunkPos cp = chunk.getPos();
         ChunkSection[] sections = chunk.getSectionArray();
 
-        // FIX LỖI 2: Duyệt mảng bằng index để tự tính toán độ cao Y chuẩn xác
         for (int i = 0; i < sections.length; i++) {
             ChunkSection section = sections[i];
             if (section == null || section.isEmpty()) continue;
 
+            int sectionScore = 0;
             PalettedContainer<BlockState> container = section.getBlockStateContainer();
-            
-            // Tính toán độ cao Y của Section dựa trên Index (Tối ưu tuyệt đối)
             int sectionY = (chunk.getBottomSectionCoord() + i) * 16;
 
             // --- PALETTE SNIPER (FAST-FAIL) ---
             
+            // Tối ưu Amethyst: Giảm điểm cộng để tránh báo động giả với Geode tự nhiên
             if (filterAmethyst.get() && container.hasAny(state -> state.getBlock() == Blocks.AMETHYST_CLUSTER)) {
-                susScore += 100;
+                sectionScore += 15;
             }
 
             if (container.hasAny(state -> {
                 Block b = state.getBlock();
                 return b == Blocks.ENDER_CHEST || b == Blocks.ENCHANTING_TABLE || b == Blocks.ANVIL || b == Blocks.BEACON;
             })) {
-                susScore += 100; 
+                sectionScore += 100; 
             }
 
             boolean hasTier2 = container.hasAny(state -> {
@@ -239,20 +246,20 @@ public class SusChunkFinder extends Module {
 
                             if (hasHeuristics) {
                                 if (filterRotatedDeepslate.get() && block == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
-                                    if (state.get(Properties.AXIS) != Direction.Axis.Y) susScore += 10; 
+                                    if (state.get(Properties.AXIS) != Direction.Axis.Y) sectionScore += 10; 
                                 }
 
                                 if (filterKelp.get() && (block == Blocks.KELP || block == Blocks.KELP_PLANT)) {
-                                    if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) susScore += 3; 
+                                    if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) sectionScore += 3; 
                                 }
                                 
                                 if (filterCaveVines.get() && (block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT)) {
-                                    if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) susScore += 3;
+                                    if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) sectionScore += 3;
                                 }
                                 
                                 if (filterVines.get() && block == Blocks.VINE) {
                                     vineCount++;
-                                    susScore += 1; 
+                                    sectionScore += 1; 
                                 }
                             }
                         }
@@ -263,16 +270,32 @@ public class SusChunkFinder extends Module {
                     maxUndergroundAir = currentSectionAir;
                 }
             }
+
+            totalSusScore += sectionScore;
+
+            // Xác định vị trí Y nghi ngờ nhất
+            if (sectionScore > highestSectionScore) {
+                highestSectionScore = sectionScore;
+                bestMinY = sectionY;
+                bestMaxY = sectionY + 16;
+            }
         }
         
-        if (functionalBlocks >= 4) susScore += 50; 
-        if (artificialBlocks > 400) susScore += 50; 
-        if (filterVines.get() && vineCount > 80) susScore += 30; 
+        // Cộng thêm điểm thưởng từ tổng thể
+        if (functionalBlocks >= 4) totalSusScore += 50; 
+        if (artificialBlocks > 400) totalSusScore += 50; 
+        if (filterVines.get() && vineCount > 80) totalSusScore += 30; 
         
-        if (maxUndergroundAir > 3000) susScore += 50; 
-        if (maxUndergroundAir > 3800) susScore += 100; 
+        if (maxUndergroundAir > 3000) totalSusScore += 50; 
+        if (maxUndergroundAir > 3800) totalSusScore += 100; 
 
-        return susScore;
+        // Nếu điểm cao chỉ nhờ Air, vẽ bounding box bao quanh khu vực có Air
+        if (highestSectionScore == 0 && maxUndergroundAir > 3000) {
+            bestMinY = mc.world.getBottomY();
+            bestMaxY = 50;
+        }
+
+        return new int[]{totalSusScore, bestMinY, bestMaxY};
     }
 
     // ==========================================
@@ -289,16 +312,17 @@ public class SusChunkFinder extends Module {
 
         pruneDistantChunks();
 
-        double targetY = 50.0;
-
         for (Map.Entry<Long, int[]> entry : renderCache.entrySet()) {
             int[] coords = entry.getValue();
             int bx = coords[0];
-            int bz = coords[1];
+            int minY = coords[1];
+            int bz = coords[2];
+            int maxY = coords[3];
 
+            // Render khung 3D chính xác tại độ cao phát hiện
             event.renderer.box(
-                bx,      targetY,       bz,
-                bx + 16, targetY + 0.1, bz + 16,
+                bx,      minY, bz,
+                bx + 16, maxY, bz + 16,
                 sideColor, lineColor,
                 ShapeMode.Both, 0 
             );
