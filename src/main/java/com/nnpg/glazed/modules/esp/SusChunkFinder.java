@@ -2,6 +2,7 @@ package com.nnpg.glazed.modules.esp;
 
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -44,15 +45,15 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> stashThreshold = sgGeneral.add(
         new IntSetting.Builder()
             .name("stash-packet-threshold")
-            .description("Ngưỡng dung lượng (Bytes). Vượt mức này = 100% Base (Bypass mọi Anti-Xray).")
-            .defaultValue(45000).min(10000).max(100000).sliderRange(20000, 80000)
+            .description("Ngưỡng dung lượng (Bytes). Vượt mức này = 100% Base.")
+            .defaultValue(40000).min(10000).max(100000).sliderRange(20000, 80000)
             .build()
     );
 
     private final Setting<Integer> renderDistance = sgGeneral.add(
         new IntSetting.Builder()
             .name("render-distance")
-            .description("Bán kính VẼ thảm đỏ (Không ảnh hưởng đến khả năng BẮT mạng).")
+            .description("Bán kính VẼ thảm đỏ (Tối ưu Render).")
             .defaultValue(6).min(1).max(16).sliderRange(1, 16)
             .build()
     );
@@ -60,7 +61,7 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Độ nhạy Krypton (1 = Khó, 10 = Cực Nhạy). Khuyên dùng: 5-7.")
+            .description("Độ nhạy Krypton (1 = Khó, 10 = Cực Nhạy).")
             .defaultValue(6).min(1).max(10).sliderRange(1, 10)
             .build()
     );
@@ -86,17 +87,20 @@ public class SusChunkFinder extends Module {
     private final Setting<Boolean> filterBamboo = sgGeneral.add(new BoolSetting.Builder().name("bamboo").defaultValue(false).build());
 
     // ==========================================
-    // KRYPTON CACHE & ACCUMULATOR
+    // KRYPTON CACHE & THREADING
     // ==========================================
 
     private final Map<Long, ChunkPos> baseCache = new ConcurrentHashMap<>();
     private final Set<Long> newChunkCache = ConcurrentHashMap.newKeySet(); 
-    
     private final Map<Long, Integer> chunkSusScores = new ConcurrentHashMap<>();
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
+    
+    // TỐI ƯU 1: Nâng cấp động cơ từ 2 luồng lên 4 luồng mạnh mẽ để quét không bị trễ
+    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
+    
+    private int pruneTimer = 0;
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Đo dung lượng Packet thô & Chấm điểm Trọng số đa luồng.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Krypton: Đo Packet thô & Chấm điểm Trọng số (Bản Tối Ưu Hiệu Năng).");
     }
 
     @Override
@@ -104,6 +108,7 @@ public class SusChunkFinder extends Module {
         baseCache.clear(); 
         newChunkCache.clear();
         chunkSusScores.clear();
+        pruneTimer = 0;
     }
 
     @Override
@@ -114,14 +119,13 @@ public class SusChunkFinder extends Module {
     }
 
     // ==========================================
-    // TẦNG MẠNG
+    // TẦNG MẠNG (ĐÓN LÕNG GÓI TIN)
     // ==========================================
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // 1. CHỐNG BÁO ĐỘNG GIẢ ĐẤT MỚI
         if (event.packet instanceof BlockUpdateS2CPacket updatePacket) {
             BlockState state = updatePacket.getState();
             if (!state.getFluidState().isEmpty()) {
@@ -131,46 +135,32 @@ public class SusChunkFinder extends Module {
             }
         }
 
-        // 2. KRYPTON DUAL-CORE SNIPER
-        if (event.packet instanceof ChunkDataS2CPacket chunkPacket) {
+        else if (event.packet instanceof ChunkDataS2CPacket chunkPacket) {
             int cx = chunkPacket.getChunkX();
             int cz = chunkPacket.getChunkZ();
             long key = ChunkPos.toLong(cx, cz);
 
             if (baseCache.containsKey(key)) return;
 
-            // [LỚP 1]: TRẠM CÂN TẢI TRỌNG (Đo dung lượng Packet thô)
+            // [LỚP 1]: TRẠM CÂN (Hoạt động siêu tốc)
             try {
                 PacketByteBuf buf = chunkPacket.getChunkData().getSectionsDataBuf();
                 if (buf != null && buf.readableBytes() > stashThreshold.get()) {
                     baseCache.put(key, new ChunkPos(cx, cz));
-                    return; // Quá nặng -> 100% là kho đồ, bỏ qua các bước kiểm tra khác
+                    return; 
                 }
             } catch (Exception ignored) {}
 
-            // [LỚP 2]: HỆ THỐNG TRỌNG SỐ (Đếm thực thể ngầm và bù trừ tự nhiên)
+            // [LỚP 2]: TRỌNG SỐ (Quét bằng Visitor - Không tốn RAM)
             try {
                 int[] scoreCounter = {0};
                 chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
-                    if (bType == BlockEntityType.SHULKER_BOX || bType == BlockEntityType.ENDER_CHEST) {
-                        scoreCounter[0] += 50; 
-                    } 
-                    else if (bType == BlockEntityType.HOPPER) {
-                        scoreCounter[0] += 10; 
-                    } 
-                    else if (bType == BlockEntityType.CHEST || bType == BlockEntityType.BARREL || bType == BlockEntityType.TRAPPED_CHEST) {
-                        scoreCounter[0] += 2; 
-                    } 
-                    else if (bType == BlockEntityType.FURNACE || bType == BlockEntityType.SMOKER || bType == BlockEntityType.BLAST_FURNACE) {
-                        scoreCounter[0] += 2;
-                    } 
-                    // Phạt điểm khối tự nhiên
-                    else if (bType == BlockEntityType.MOB_SPAWNER) {
-                        scoreCounter[0] -= 100; 
-                    } 
-                    else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) {
-                        scoreCounter[0] -= 50; 
-                    }
+                    if (bType == BlockEntityType.SHULKER_BOX || bType == BlockEntityType.ENDER_CHEST) scoreCounter[0] += 50; 
+                    else if (bType == BlockEntityType.HOPPER) scoreCounter[0] += 10; 
+                    else if (bType == BlockEntityType.CHEST || bType == BlockEntityType.BARREL || bType == BlockEntityType.TRAPPED_CHEST) scoreCounter[0] += 2; 
+                    else if (bType == BlockEntityType.FURNACE || bType == BlockEntityType.SMOKER || bType == BlockEntityType.BLAST_FURNACE) scoreCounter[0] += 2;
+                    else if (bType == BlockEntityType.MOB_SPAWNER) scoreCounter[0] -= 100; 
+                    else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) scoreCounter[0] -= 50; 
                 });
                 
                 if (scoreCounter[0] > 0) {
@@ -178,29 +168,22 @@ public class SusChunkFinder extends Module {
                 }
             } catch (Exception ignored) {}
 
+            // Đẩy việc nặng xuống Background
             runHeuristicScan(cx, cz, key);
         }
 
-        // 3. THỰC THỂ LẠ
         else if (event.packet instanceof EntitySpawnS2CPacket spawnPacket) {
             EntityType<?> type = spawnPacket.getEntityType();
             if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || type == EntityType.ARMOR_STAND) {
-                int cx = ((int) spawnPacket.getX()) >> 4;
-                int cz = ((int) spawnPacket.getZ()) >> 4;
-                addSusScore(cx, cz, 40); 
+                addSusScore(((int) spawnPacket.getX()) >> 4, ((int) spawnPacket.getZ()) >> 4, 40); 
             }
         }
 
-        // 4. MICRO-PACKETS
         else if (event.packet instanceof BlockEntityUpdateS2CPacket updatePacket) {
             BlockPos bPos = updatePacket.getPos();
             addSusScore(bPos.getX() >> 4, bPos.getZ() >> 4, 15); 
         }
     }
-
-    // ==========================================
-    // LOGIC CỘNG DỒN ĐIỂM (ACCUMULATOR)
-    // ==========================================
 
     private void addSusScore(int cx, int cz, int amount) {
         long key = ChunkPos.toLong(cx, cz);
@@ -210,7 +193,6 @@ public class SusChunkFinder extends Module {
         chunkSusScores.put(key, currentScore);
 
         int threshold = (11 - sensitivity.get()) * 15; 
-        
         if (currentScore >= threshold) {
             baseCache.put(key, new ChunkPos(cx, cz));
             chunkSusScores.remove(key); 
@@ -218,7 +200,7 @@ public class SusChunkFinder extends Module {
     }
 
     // ==========================================
-    // QUÉT KHỐI PHỤ TRỢ (HEURISTIC)
+    // BACKGROUND HEURISTICS (Đã tối ưu)
     // ==========================================
 
     private void runHeuristicScan(int cx, int cz, long key) {
@@ -226,87 +208,115 @@ public class SusChunkFinder extends Module {
             !filterAmethyst.get() && !filterBamboo.get() && !filterBeeNest.get() && 
             !filterRotatedDeepslate.get()) return;
 
-        mc.execute(() -> {
-            if (mc.world == null) return;
-            WorldChunk chunk = mc.world.getChunk(cx, cz);
-            
-            if (chunk != null && !chunk.isEmpty()) {
-                EXECUTOR.execute(() -> {
-                    try {
-                        if (newChunkCache.contains(key)) return; 
+        // Chỉ đưa vào luồng nếu thực sự cần quét block
+        EXECUTOR.execute(() -> {
+            try {
+                if (newChunkCache.contains(key)) return; 
+                
+                // Trì hoãn một chút để đảm bảo Chunk đã thực sự load vào thế giới
+                Thread.sleep(20);
+                if (mc.world == null) return;
+                
+                WorldChunk chunk = mc.world.getChunk(cx, cz);
+                if (chunk == null || chunk.isEmpty()) return;
 
-                        int blockScore = 0;
-                        for (ChunkSection section : chunk.getSectionArray()) {
-                            if (section == null || section.isEmpty()) continue;
-                            PalettedContainer<BlockState> container = section.getBlockStateContainer();
+                int blockScore = 0;
+                for (ChunkSection section : chunk.getSectionArray()) {
+                    if (section == null || section.isEmpty()) continue;
+                    PalettedContainer<BlockState> container = section.getBlockStateContainer();
 
-                            boolean hasTargetBlocks = container.hasAny(state -> {
+                    boolean hasTargetBlocks = container.hasAny(state -> {
+                        Block b = state.getBlock();
+                        return (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) ||
+                               (filterBeeNest.get() && b == Blocks.BEE_NEST) ||
+                               (filterBamboo.get() && b == Blocks.BAMBOO) ||
+                               (filterRotatedDeepslate.get() && b == Blocks.DEEPSLATE) ||
+                               (filterKelp.get() && (b == Blocks.KELP || b == Blocks.KELP_PLANT)) ||
+                               (filterCaveVines.get() && (b == Blocks.CAVE_VINES || b == Blocks.CAVE_VINES_PLANT)) ||
+                               (filterVines.get() && b == Blocks.VINE);
+                    });
+
+                    if (!hasTargetBlocks) continue;
+
+                    for (int x = 0; x < 16; x++) {
+                        for (int y = 0; y < 16; y++) {
+                            for (int z = 0; z < 16; z++) {
+                                BlockState state = container.get(x, y, z);
                                 Block b = state.getBlock();
-                                return (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) ||
-                                       (filterBeeNest.get() && b == Blocks.BEE_NEST) ||
-                                       (filterBamboo.get() && b == Blocks.BAMBOO) ||
-                                       (filterRotatedDeepslate.get() && b == Blocks.DEEPSLATE) ||
-                                       (filterKelp.get() && (b == Blocks.KELP || b == Blocks.KELP_PLANT)) ||
-                                       (filterCaveVines.get() && (b == Blocks.CAVE_VINES || b == Blocks.CAVE_VINES_PLANT)) ||
-                                       (filterVines.get() && b == Blocks.VINE);
-                            });
 
-                            if (!hasTargetBlocks) continue;
-
-                            for (int x = 0; x < 16; x++) {
-                                for (int y = 0; y < 16; y++) {
-                                    for (int z = 0; z < 16; z++) {
-                                        BlockState state = container.get(x, y, z);
-                                        Block b = state.getBlock();
-
-                                        if (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) blockScore += 20;
-                                        if (filterBeeNest.get() && b == Blocks.BEE_NEST) blockScore += 10;
-                                        if (filterBamboo.get() && b == Blocks.BAMBOO) blockScore += 5;
-                                        if (filterVines.get() && b == Blocks.VINE) blockScore += 2;
-
-                                        if (filterRotatedDeepslate.get() && b == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
-                                            if (state.get(Properties.AXIS) != Direction.Axis.Y) blockScore += 50; 
-                                        }
-                                        if (filterKelp.get() && (b == Blocks.KELP || b == Blocks.KELP_PLANT)) {
-                                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) blockScore += 15; 
-                                        }
-                                        if (filterCaveVines.get() && (b == Blocks.CAVE_VINES || b == Blocks.CAVE_VINES_PLANT)) {
-                                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) blockScore += 15;
-                                        }
-                                    }
+                                if (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) blockScore += 20;
+                                else if (filterBeeNest.get() && b == Blocks.BEE_NEST) blockScore += 10;
+                                else if (filterBamboo.get() && b == Blocks.BAMBOO) blockScore += 5;
+                                else if (filterVines.get() && b == Blocks.VINE) blockScore += 2;
+                                else if (filterRotatedDeepslate.get() && b == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
+                                    if (state.get(Properties.AXIS) != Direction.Axis.Y) blockScore += 50; 
+                                }
+                                else if (filterKelp.get() && (b == Blocks.KELP || b == Blocks.KELP_PLANT)) {
+                                    if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) blockScore += 15; 
+                                }
+                                else if (filterCaveVines.get() && (b == Blocks.CAVE_VINES || b == Blocks.CAVE_VINES_PLANT)) {
+                                    if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) blockScore += 15;
                                 }
                             }
                         }
+                    }
+                }
 
-                        if (blockScore > 0) {
-                            addSusScore(cx, cz, blockScore + 30); 
-                        }
-                    } catch (Exception ignored) {}
-                });
-            }
+                if (blockScore > 0) {
+                    addSusScore(cx, cz, blockScore + 30); 
+                }
+            } catch (Exception ignored) {}
         });
     }
 
     // ==========================================
-    // VẼ ĐỒ HỌA (KRYPTON RED CARPET)
+    // TỐI ƯU HÓA FPS: CHU KỲ DỌN RÁC
+    // ==========================================
+
+    @EventHandler
+    private void onTick(TickEvent.Post event) {
+        // TỐI ƯU 2: Chỉ dọn rác 1 lần mỗi giây (20 Ticks) thay vì dọn liên tục làm giật màn hình
+        pruneTimer++;
+        if (pruneTimer >= 20) {
+            pruneCaches();
+            pruneTimer = 0;
+        }
+    }
+
+    private void pruneCaches() {
+        if (mc.player == null) return;
+        int pCx = mc.player.getChunkPos().x;
+        int pCz = mc.player.getChunkPos().z;
+        int killDistance = 50; 
+
+        baseCache.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
+        newChunkCache.removeIf(key -> isTooFar(key, pCx, pCz, killDistance));
+        chunkSusScores.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
+    }
+
+    private boolean isTooFar(long key, int pCx, int pCz, int dist) {
+        ChunkPos cp = new ChunkPos(key);
+        return Math.abs(cp.x - pCx) > dist || Math.abs(cp.z - pCz) > dist;
+    }
+
+    // ==========================================
+    // VẼ ĐỒ HỌA (Mượt mà)
     // ==========================================
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.world == null || baseCache.isEmpty()) return;
-
-        pruneCaches();
+        if (mc.world == null || mc.player == null || baseCache.isEmpty()) return;
 
         int aBase = alpha.get();
         Color baseSideColor = new Color(255, 0, 0, aBase);
         Color baseLineColor = new Color(255, 0, 0, 255); 
         double baseY = 62.0; 
 
-        if (mc.player == null) return;
         int pCx = mc.player.getChunkPos().x;
         int pCz = mc.player.getChunkPos().z;
         int maxDist = renderDistance.get();
 
+        // Vòng lặp Render giờ đây siêu nhẹ vì không còn bị kẹp chung với lệnh Prune (dọn rác)
         for (ChunkPos pos : baseCache.values()) {
             if (Math.abs(pos.x - pCx) <= maxDist && Math.abs(pos.z - pCz) <= maxDist) {
                 int bx = pos.getStartX();
@@ -320,22 +330,5 @@ public class SusChunkFinder extends Module {
                 );
             }
         }
-    }
-
-    private void pruneCaches() {
-        if (mc.player == null) return;
-        int pCx = mc.player.getChunkPos().x;
-        int pCz = mc.player.getChunkPos().z;
-        
-        int killDistance = 50; 
-
-        baseCache.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
-        newChunkCache.removeIf(key -> isTooFar(key, pCx, pCz, killDistance));
-        chunkSusScores.entrySet().removeIf(e -> isTooFar(e.getKey(), pCx, pCz, killDistance));
-    }
-
-    private boolean isTooFar(long key, int pCx, int pCz, int dist) {
-        ChunkPos cp = new ChunkPos(key);
-        return Math.abs(cp.x - pCx) > dist || Math.abs(cp.z - pCz) > dist;
     }
 }
