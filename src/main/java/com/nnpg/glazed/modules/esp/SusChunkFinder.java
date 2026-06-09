@@ -147,7 +147,7 @@ public class SusChunkFinder extends Module {
                         scoreCounter[0] += 2;
                     } 
                     // CHỐNG NHIỄU TỰ NHIÊN: Gặp Lồng Tỷ Phú hoặc Chuông Làng là phạt điểm kịch khung
-                    else if (bType == BlockEntityType.SPAWNER) {
+                    else if (bType == BlockEntityType.MOB_SPAWNER) {
                         scoreCounter[0] -= 100; // Khóa mỏm Hang Nhện/Hầm mỏ
                     } 
                     else if (bType == BlockEntityType.BELL || bType == BlockEntityType.CAMPFIRE) {
