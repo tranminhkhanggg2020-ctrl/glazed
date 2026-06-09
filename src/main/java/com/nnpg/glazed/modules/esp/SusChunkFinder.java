@@ -9,6 +9,7 @@ import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.network.packet.s2c.play.BlockEntityUpdateS2CPacket;
+import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
 import net.minecraft.entity.EntityType;
 import net.minecraft.util.math.BlockPos;
@@ -24,7 +25,6 @@ import net.minecraft.state.property.Properties;
 
 import com.nnpg.glazed.GlazedAddon;
 
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -33,9 +33,10 @@ import java.util.concurrent.Executors;
 public class SusChunkFinder extends Module {
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgAge     = settings.createGroup("Chunk Age (Trail)");
 
     // ==========================================
-    // CÀI ĐẶT GIAO DIỆN (Trùng khớp 100% hình ảnh)
+    // CÀI ĐẶT RADAR BASE (KRYPTON)
     // ==========================================
 
     private final Setting<Integer> simulationDistance = sgGeneral.add(
@@ -49,80 +50,80 @@ public class SusChunkFinder extends Module {
     private final Setting<Integer> sensitivity = sgGeneral.add(
         new IntSetting.Builder()
             .name("sensitivity")
-            .description("Độ nhạy radar (Krypton Entity Threshold).")
+            .description("Độ nhạy radar Base (Krypton Entity Threshold).")
             .defaultValue(3).min(1).max(10).sliderRange(1, 10)
             .build()
     );
 
     private final Setting<Integer> alpha = sgGeneral.add(
         new IntSetting.Builder()
-            .name("alpha")
-            .description("Độ trong suốt của thảm Krypton (Y=62).")
+            .name("base-alpha")
+            .description("Độ trong suốt của thảm Base màu ĐỎ (Y=62).")
             .defaultValue(52).min(0).max(255).sliderRange(0, 255)
             .build()
     );
 
-    private final Setting<Boolean> filterKelp = sgGeneral.add(
-        new BoolSetting.Builder().name("kelp").defaultValue(false).build()
+    // ==========================================
+    // CÀI ĐẶT CHUNK AGE (ĐƯỜNG MÒN)
+    // ==========================================
+
+    private final Setting<Boolean> trackOldChunks = sgAge.add(
+        new BoolSetting.Builder()
+            .name("track-old-chunks")
+            .description("Bật/Tắt rải thảm xanh nối liền để theo dấu vết người chơi.")
+            .defaultValue(true)
+            .build()
     );
 
-    private final Setting<Boolean> filterCaveVines = sgGeneral.add(
-        new BoolSetting.Builder().name("cave-vines").defaultValue(false).build()
+    private final Setting<Integer> ageAlpha = sgAge.add(
+        new IntSetting.Builder()
+            .name("age-alpha")
+            .description("Độ trong suốt của thảm vệt dấu chân màu XANH LÁ.")
+            .defaultValue(30).min(0).max(255).sliderRange(0, 255)
+            .build()
     );
 
-    private final Setting<Boolean> filterVines = sgGeneral.add(
-        new BoolSetting.Builder().name("vines").defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> filterAmethyst = sgGeneral.add(
-        new BoolSetting.Builder().name("amethyst").defaultValue(true).build()
-    );
-
-    private final Setting<Boolean> filterBamboo = sgGeneral.add(
-        new BoolSetting.Builder().name("bamboo").defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> filterBeeNest = sgGeneral.add(
-        new BoolSetting.Builder().name("bee-nest").defaultValue(false).build()
-    );
-
-    private final Setting<Boolean> filterRotatedDeepslate = sgGeneral.add(
-        new BoolSetting.Builder().name("rotated-deepslate").defaultValue(false).build()
-    );
+    // Các bộ lọc phụ (Heuristic)
+    private final Setting<Boolean> filterKelp = sgGeneral.add(new BoolSetting.Builder().name("kelp").defaultValue(false).build());
+    private final Setting<Boolean> filterCaveVines = sgGeneral.add(new BoolSetting.Builder().name("cave-vines").defaultValue(false).build());
+    private final Setting<Boolean> filterVines = sgGeneral.add(new BoolSetting.Builder().name("vines").defaultValue(false).build());
+    private final Setting<Boolean> filterAmethyst = sgGeneral.add(new BoolSetting.Builder().name("amethyst").defaultValue(true).build());
+    private final Setting<Boolean> filterBamboo = sgGeneral.add(new BoolSetting.Builder().name("bamboo").defaultValue(false).build());
+    private final Setting<Boolean> filterBeeNest = sgGeneral.add(new BoolSetting.Builder().name("bee-nest").defaultValue(false).build());
+    private final Setting<Boolean> filterRotatedDeepslate = sgGeneral.add(new BoolSetting.Builder().name("rotated-deepslate").defaultValue(false).build());
 
     // ==========================================
     // HỆ THỐNG LÕI & CACHE
     // ==========================================
 
-    private final Map<Long, ChunkPos> renderCache = new ConcurrentHashMap<>();
+    private final Map<Long, ChunkPos> baseCache = new ConcurrentHashMap<>();
+    private final Map<Long, ChunkPos> oldChunkCache = new ConcurrentHashMap<>();
     private final Map<Long, Integer> chunkSusScores = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Dò Base chuẩn Krypton Client: Đếm thực thể chìm & Lọc Heuristic. Trải thảm ở Y=62.");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Săn Base Tối Thượng: Kết hợp dò Rương (Packet Sniping) & Theo Dấu Chân (Chunk Age).");
     }
 
     @Override
     public void onActivate() { 
-        renderCache.clear(); 
+        baseCache.clear(); 
+        oldChunkCache.clear();
         chunkSusScores.clear();
     }
 
     @Override
     public void onDeactivate() { 
-        renderCache.clear(); 
+        baseCache.clear(); 
+        oldChunkCache.clear();
         chunkSusScores.clear();
     }
 
-    // ==========================================
-    // VŨ KHÍ 1: KRYPTON DEEP PACKET INSPECTION
-    // ==========================================
-    
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // BẮT GÓI TIN CHUNK GỐC (Krypton BlockEntity Counter)
+        // 1. XỬ LÝ GÓI TIN CHUNK GỐC
         if (event.packet instanceof ChunkDataS2CPacket chunkPacket) {
             int cx = chunkPacket.getChunkX();
             int cz = chunkPacket.getChunkZ();
@@ -132,55 +133,64 @@ public class SusChunkFinder extends Module {
             ChunkPos pos = new ChunkPos(cx, cz);
             long key = pos.toLong();
 
-            if (renderCache.containsKey(key)) return;
+            // [TÍNH NĂNG CHUNK AGE]: Mặc định ghi nhận mọi chunk mới tải là Chunk Già (Đã sinh ra từ trước)
+            if (trackOldChunks.get()) {
+                oldChunkCache.put(key, pos);
+            }
 
+            if (baseCache.containsKey(key)) return;
+
+            // [VŨ KHÍ KRYPTON]: Đếm thực thể chìm với bản vá Visitor Pattern (Không lo tràn RAM)
             try {
-                // Đếm trực tiếp BlockEntity bị giấu bằng Visitor Pattern (Chuẩn Krypton)
-int[] counter = {0};
-chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
-    counter[0]++;
-});
-int beCount = counter[0];
+                int[] counter = {0};
+                chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
+                    counter[0]++;
+                });
+                int beCount = counter[0];
 
-                // Công thức tính ngưỡng linh động theo Sensitivity của bạn (VD: Sens 3 -> Cần ~80 Entities)
                 int threshold = (11 - sensitivity.get()) * 10; 
 
                 if (beCount >= threshold) {
-                    renderCache.put(key, pos);
+                    baseCache.put(key, pos);
                     return;
                 }
             } catch (Exception ignored) {}
 
-            // Chạy phân tích Heuristic theo khối nếu packet không vượt ngưỡng
             runHeuristicScan(cx, cz, key, pos);
         }
 
-        // BẮT GÓI TIN THỰC THỂ (Entity Sniping)
+        // 2. KHAI THÁC LỖI DÒNG CHẢY (Để loại bỏ Chunk Trẻ khỏi đường mòn)
+        else if (event.packet instanceof BlockUpdateS2CPacket updatePacket) {
+            BlockState state = updatePacket.getState();
+            BlockPos bPos = updatePacket.getPos();
+            
+            // Nếu đây là dòng chảy chất lỏng -> Chunk này vừa mới được game tạo ra
+            if (trackOldChunks.get() && !state.getFluidState().isEmpty()) {
+                long key = ChunkPos.toLong(bPos.getX() >> 4, bPos.getZ() >> 4);
+                oldChunkCache.remove(key); // Xóa khỏi danh sách Chunk Già
+            }
+        }
+
+        // 3. BẮT THỰC THỂ LẠ (Entity Sniping cho Base)
         else if (event.packet instanceof EntitySpawnS2CPacket spawnPacket) {
             EntityType<?> type = spawnPacket.getEntityType();
-            // Phát hiện khung vật phẩm, xe mỏ có rương, giá để giáp
             if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || 
                 type == EntityType.CHEST_MINECART || type == EntityType.ARMOR_STAND) {
                 
                 int cx = ((int) spawnPacket.getX()) >> 4;
                 int cz = ((int) spawnPacket.getZ()) >> 4;
-                addSusScore(cx, cz, 15); // Tăng điểm nghi ngờ rất cao
+                addSusScore(cx, cz, 15); 
             }
         }
 
-        // BẮT MICRO-PACKETS (Dữ liệu Redstone/Lò nung cập nhật lẻ tẻ)
+        // 4. MICRO-PACKETS
         else if (event.packet instanceof BlockEntityUpdateS2CPacket updatePacket) {
             BlockPos bPos = updatePacket.getPos();
             addSusScore(bPos.getX() >> 4, bPos.getZ() >> 4, 5);
         }
     }
 
-    // ==========================================
-    // VŨ KHÍ 2: HEURISTIC BLOCK SCANNING (Các Checkbox)
-    // ==========================================
-
     private void runHeuristicScan(int cx, int cz, long key, ChunkPos pos) {
-        // Chỉ chạy các vòng lặp này nếu có ít nhất 1 checkbox được bật
         if (!filterKelp.get() && !filterCaveVines.get() && !filterVines.get() && 
             !filterAmethyst.get() && !filterBamboo.get() && !filterBeeNest.get() && 
             !filterRotatedDeepslate.get()) return;
@@ -193,13 +203,10 @@ int beCount = counter[0];
                 EXECUTOR.execute(() -> {
                     try {
                         int score = 0;
-                        ChunkSection[] sections = chunk.getSectionArray();
-
-                        for (ChunkSection section : sections) {
+                        for (ChunkSection section : chunk.getSectionArray()) {
                             if (section == null || section.isEmpty()) continue;
                             PalettedContainer<BlockState> container = section.getBlockStateContainer();
 
-                            // Quét nhanh qua Palette trước khi đi vào chi tiết
                             boolean hasTargetBlocks = container.hasAny(state -> {
                                 Block b = state.getBlock();
                                 return (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) ||
@@ -238,9 +245,8 @@ int beCount = counter[0];
                             }
                         }
 
-                        // Ngưỡng phát hiện của khối phụ thuộc vào SENSITIVITY
                         if (score >= (11 - sensitivity.get()) * 30) {
-                            renderCache.put(key, pos);
+                            baseCache.put(key, pos);
                         }
                     } catch (Exception ignored) {}
                 });
@@ -252,45 +258,62 @@ int beCount = counter[0];
         if (!isWithinSimulationDistance(cx, cz)) return;
         long key = ChunkPos.toLong(cx, cz);
         
-        if (renderCache.containsKey(key)) return;
+        if (baseCache.containsKey(key)) return;
 
         int currentScore = chunkSusScores.getOrDefault(key, 0) + amount;
         chunkSusScores.put(key, currentScore);
 
         if (currentScore >= (11 - sensitivity.get()) * 15) {
-            renderCache.put(key, new ChunkPos(cx, cz));
+            baseCache.put(key, new ChunkPos(cx, cz));
             chunkSusScores.remove(key); 
         }
     }
 
     // ==========================================
-    // RENDER ĐỒ HỌA (KRYPTON STYLE: THẢM PHẲNG Y=62)
+    // RENDER ĐỒ HỌA MẢNG RỘNG (KRYPTON STYLE)
     // ==========================================
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.world == null || renderCache.isEmpty()) return;
-
-        int a = alpha.get();
-        Color sideColor = new Color(255, 0, 0, a);
-        Color lineColor = new Color(255, 0, 0, 255); 
-
+        if (mc.world == null) return;
         pruneDistantChunks();
 
-        // Cố định độ cao ở Y = 62 (Mặt nước / Tầm nhìn tối ưu)
-        double targetY = 62.0;
+        // 1. RENDER ĐƯỜNG MÒN CHUNK GIÀ (MÀU XANH LÁ)
+        if (trackOldChunks.get() && !oldChunkCache.isEmpty()) {
+            int aAge = ageAlpha.get();
+            Color ageSideColor = new Color(0, 255, 0, aAge);
+            Color ageLineColor = new Color(0, 255, 0, Math.min(255, aAge + 50));
+            double ageY = 61.9; // Nằm sát ngay dưới thảm đỏ để không bị đè màu
 
-        for (ChunkPos pos : renderCache.values()) {
-            int bx = pos.getStartX();
-            int bz = pos.getStartZ();
+            for (ChunkPos pos : oldChunkCache.values()) {
+                int bx = pos.getStartX();
+                int bz = pos.getStartZ();
+                event.renderer.box(
+                    bx,      ageY,       bz,
+                    bx + 16, ageY + 0.1, bz + 16,
+                    ageSideColor, ageLineColor,
+                    ShapeMode.Both, 0 
+                );
+            }
+        }
 
-            // Vẽ một lớp thảm đỏ phẳng lì bao phủ toàn bộ chunk (16x16)
-            event.renderer.box(
-                bx,      targetY,       bz,
-                bx + 16, targetY + 0.1, bz + 16,
-                sideColor, lineColor,
-                ShapeMode.Both, 0 
-            );
+        // 2. RENDER MỤC TIÊU BASE (MÀU ĐỎ RỰC)
+        if (!baseCache.isEmpty()) {
+            int aBase = alpha.get();
+            Color baseSideColor = new Color(255, 0, 0, aBase);
+            Color baseLineColor = new Color(255, 0, 0, 255); 
+            double baseY = 62.0; 
+
+            for (ChunkPos pos : baseCache.values()) {
+                int bx = pos.getStartX();
+                int bz = pos.getStartZ();
+                event.renderer.box(
+                    bx,      baseY,       bz,
+                    bx + 16, baseY + 0.1, bz + 16,
+                    baseSideColor, baseLineColor,
+                    ShapeMode.Both, 0 
+                );
+            }
         }
     }
 
@@ -300,10 +323,13 @@ int beCount = counter[0];
         int playerCz = mc.player.getChunkPos().z;
         int dist = simulationDistance.get();
 
-        renderCache.entrySet().removeIf(entry -> {
-            ChunkPos cp = new ChunkPos(entry.getKey());
-            return Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
-        });
+        baseCache.entrySet().removeIf(entry -> isTooFar(entry.getKey(), playerCx, playerCz, dist));
+        oldChunkCache.entrySet().removeIf(entry -> isTooFar(entry.getKey(), playerCx, playerCz, dist));
+    }
+
+    private boolean isTooFar(long key, int playerCx, int playerCz, int dist) {
+        ChunkPos cp = new ChunkPos(key);
+        return Math.abs(cp.x - playerCx) > dist || Math.abs(cp.z - playerCz) > dist;
     }
 
     private boolean isWithinSimulationDistance(int cx, int cz) {
