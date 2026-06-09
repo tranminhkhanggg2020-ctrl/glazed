@@ -26,6 +26,7 @@ import net.minecraft.state.property.Properties;
 import com.nnpg.glazed.GlazedAddon;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,10 +34,9 @@ import java.util.concurrent.Executors;
 public class SusChunkFinder extends Module {
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgAge     = settings.createGroup("Chunk Age (Trail)");
 
     // ==========================================
-    // CÀI ĐẶT RADAR BASE (KRYPTON)
+    // CÀI ĐẶT GIAO DIỆN CHÍNH
     // ==========================================
 
     private final Setting<Integer> simulationDistance = sgGeneral.add(
@@ -57,33 +57,16 @@ public class SusChunkFinder extends Module {
 
     private final Setting<Integer> alpha = sgGeneral.add(
         new IntSetting.Builder()
-            .name("base-alpha")
-            .description("Độ trong suốt của thảm Base màu ĐỎ (Y=62).")
+            .name("alpha")
+            .description("Độ trong suốt của Thảm Đỏ (Y=62).")
             .defaultValue(52).min(0).max(255).sliderRange(0, 255)
             .build()
     );
 
     // ==========================================
-    // CÀI ĐẶT CHUNK AGE (ĐƯỜNG MÒN)
+    // BỘ LỌC HEURISTIC
     // ==========================================
-
-    private final Setting<Boolean> trackOldChunks = sgAge.add(
-        new BoolSetting.Builder()
-            .name("track-old-chunks")
-            .description("Bật/Tắt rải thảm xanh nối liền để theo dấu vết người chơi.")
-            .defaultValue(true)
-            .build()
-    );
-
-    private final Setting<Integer> ageAlpha = sgAge.add(
-        new IntSetting.Builder()
-            .name("age-alpha")
-            .description("Độ trong suốt của thảm vệt dấu chân màu XANH LÁ.")
-            .defaultValue(30).min(0).max(255).sliderRange(0, 255)
-            .build()
-    );
-
-    // Các bộ lọc phụ (Heuristic)
+    
     private final Setting<Boolean> filterKelp = sgGeneral.add(new BoolSetting.Builder().name("kelp").defaultValue(false).build());
     private final Setting<Boolean> filterCaveVines = sgGeneral.add(new BoolSetting.Builder().name("cave-vines").defaultValue(false).build());
     private final Setting<Boolean> filterVines = sgGeneral.add(new BoolSetting.Builder().name("vines").defaultValue(false).build());
@@ -97,25 +80,25 @@ public class SusChunkFinder extends Module {
     // ==========================================
 
     private final Map<Long, ChunkPos> baseCache = new ConcurrentHashMap<>();
-    private final Map<Long, ChunkPos> oldChunkCache = new ConcurrentHashMap<>();
+    private final Set<Long> newChunkCache = ConcurrentHashMap.newKeySet(); // Chứa các Chunk MỚI TINH
     private final Map<Long, Integer> chunkSusScores = new ConcurrentHashMap<>();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
 
     public SusChunkFinder() {
-        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Radar Săn Base Tối Thượng: Kết hợp dò Rương (Packet Sniping) & Theo Dấu Chân (Chunk Age).");
+        super(GlazedAddon.CATEGORY, "sus-chunk-finder", "Dò Base Krypton: Trải thảm ĐỎ khi Dấu vết Base + Tín hiệu Chunk Cũ cộng dồn.");
     }
 
     @Override
     public void onActivate() { 
         baseCache.clear(); 
-        oldChunkCache.clear();
+        newChunkCache.clear();
         chunkSusScores.clear();
     }
 
     @Override
     public void onDeactivate() { 
         baseCache.clear(); 
-        oldChunkCache.clear();
+        newChunkCache.clear();
         chunkSusScores.clear();
     }
 
@@ -123,7 +106,18 @@ public class SusChunkFinder extends Module {
     private void onPacketReceive(PacketEvent.Receive event) {
         if (mc.world == null || mc.player == null) return;
 
-        // 1. XỬ LÝ GÓI TIN CHUNK GỐC
+        // 1. BẮT TÍN HIỆU ĐẤT MỚI (Liquid Flow Exploit)
+        // Bắt cập nhật dòng chảy để xác định đây là vùng đất mới chưa ai đặt chân tới
+        if (event.packet instanceof BlockUpdateS2CPacket updatePacket) {
+            BlockState state = updatePacket.getState();
+            if (!state.getFluidState().isEmpty()) {
+                BlockPos bPos = updatePacket.getPos();
+                long key = ChunkPos.toLong(bPos.getX() >> 4, bPos.getZ() >> 4);
+                newChunkCache.add(key); // Đưa vào danh sách "Đất Mới Tinh"
+            }
+        }
+
+        // 2. PHÂN TÍCH CHUNK GỐC
         if (event.packet instanceof ChunkDataS2CPacket chunkPacket) {
             int cx = chunkPacket.getChunkX();
             int cz = chunkPacket.getChunkZ();
@@ -133,45 +127,27 @@ public class SusChunkFinder extends Module {
             ChunkPos pos = new ChunkPos(cx, cz);
             long key = pos.toLong();
 
-            // [TÍNH NĂNG CHUNK AGE]: Mặc định ghi nhận mọi chunk mới tải là Chunk Già (Đã sinh ra từ trước)
-            if (trackOldChunks.get()) {
-                oldChunkCache.put(key, pos);
-            }
-
             if (baseCache.containsKey(key)) return;
 
-            // [VŨ KHÍ KRYPTON]: Đếm thực thể chìm với bản vá Visitor Pattern (Không lo tràn RAM)
+            // [KRYPTON PACKET SNIPER]: Luôn được ưu tiên tuyệt đối
             try {
                 int[] counter = {0};
                 chunkPacket.getChunkData().getBlockEntities(cx, cz).accept((bPos, bType, bNbt) -> {
                     counter[0]++;
                 });
-                int beCount = counter[0];
-
+                
                 int threshold = (11 - sensitivity.get()) * 10; 
-
-                if (beCount >= threshold) {
+                if (counter[0] >= threshold) {
                     baseCache.put(key, pos);
                     return;
                 }
             } catch (Exception ignored) {}
 
+            // Chạy bộ lọc phụ trợ
             runHeuristicScan(cx, cz, key, pos);
         }
 
-        // 2. KHAI THÁC LỖI DÒNG CHẢY (Để loại bỏ Chunk Trẻ khỏi đường mòn)
-        else if (event.packet instanceof BlockUpdateS2CPacket updatePacket) {
-            BlockState state = updatePacket.getState();
-            BlockPos bPos = updatePacket.getPos();
-            
-            // Nếu đây là dòng chảy chất lỏng -> Chunk này vừa mới được game tạo ra
-            if (trackOldChunks.get() && !state.getFluidState().isEmpty()) {
-                long key = ChunkPos.toLong(bPos.getX() >> 4, bPos.getZ() >> 4);
-                oldChunkCache.remove(key); // Xóa khỏi danh sách Chunk Già
-            }
-        }
-
-        // 3. BẮT THỰC THỂ LẠ (Entity Sniping cho Base)
+        // 3. BẮT THỰC THỂ LẠ (Entity Sniping)
         else if (event.packet instanceof EntitySpawnS2CPacket spawnPacket) {
             EntityType<?> type = spawnPacket.getEntityType();
             if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME || 
@@ -179,14 +155,14 @@ public class SusChunkFinder extends Module {
                 
                 int cx = ((int) spawnPacket.getX()) >> 4;
                 int cz = ((int) spawnPacket.getZ()) >> 4;
-                addSusScore(cx, cz, 15); 
+                addSusScore(cx, cz, 20); 
             }
         }
 
-        // 4. MICRO-PACKETS
+        // 4. MICRO-PACKETS (Dữ liệu Redstone/Lò nung)
         else if (event.packet instanceof BlockEntityUpdateS2CPacket updatePacket) {
             BlockPos bPos = updatePacket.getPos();
-            addSusScore(bPos.getX() >> 4, bPos.getZ() >> 4, 5);
+            addSusScore(bPos.getX() >> 4, bPos.getZ() >> 4, 10);
         }
     }
 
@@ -202,7 +178,13 @@ public class SusChunkFinder extends Module {
             if (chunk != null && !chunk.isEmpty()) {
                 EXECUTOR.execute(() -> {
                     try {
-                        int score = 0;
+                        // [LOGIC CỘNG DỒN]: Kiểm tra xem đây có phải Chunk Cũ không
+                        boolean isOldChunk = !newChunkCache.contains(key);
+                        
+                        // Đất mới tinh -> Khả năng là base cũ = 0 -> Hủy quét block tự nhiên (chống báo động giả)
+                        if (!isOldChunk) return; 
+
+                        int blockScore = 0;
                         for (ChunkSection section : chunk.getSectionArray()) {
                             if (section == null || section.isEmpty()) continue;
                             PalettedContainer<BlockState> container = section.getBlockStateContainer();
@@ -226,28 +208,30 @@ public class SusChunkFinder extends Module {
                                         BlockState state = container.get(x, y, z);
                                         Block b = state.getBlock();
 
-                                        if (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) score += 20;
-                                        if (filterBeeNest.get() && b == Blocks.BEE_NEST) score += 10;
-                                        if (filterBamboo.get() && b == Blocks.BAMBOO) score += 5;
-                                        if (filterVines.get() && b == Blocks.VINE) score += 2;
+                                        if (filterAmethyst.get() && b == Blocks.AMETHYST_CLUSTER) blockScore += 20;
+                                        if (filterBeeNest.get() && b == Blocks.BEE_NEST) blockScore += 10;
+                                        if (filterBamboo.get() && b == Blocks.BAMBOO) blockScore += 5;
+                                        if (filterVines.get() && b == Blocks.VINE) blockScore += 2;
 
                                         if (filterRotatedDeepslate.get() && b == Blocks.DEEPSLATE && state.contains(Properties.AXIS)) {
-                                            if (state.get(Properties.AXIS) != Direction.Axis.Y) score += 50; 
+                                            if (state.get(Properties.AXIS) != Direction.Axis.Y) blockScore += 50; 
                                         }
                                         if (filterKelp.get() && (b == Blocks.KELP || b == Blocks.KELP_PLANT)) {
-                                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) score += 15; 
+                                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) blockScore += 15; 
                                         }
                                         if (filterCaveVines.get() && (b == Blocks.CAVE_VINES || b == Blocks.CAVE_VINES_PLANT)) {
-                                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) score += 15;
+                                            if (state.contains(Properties.AGE_25) && state.get(Properties.AGE_25) == 25) blockScore += 15;
                                         }
                                     }
                                 }
                             }
                         }
 
-                        if (score >= (11 - sensitivity.get()) * 30) {
-                            baseCache.put(key, pos);
+                        // Nếu tìm thấy dấu vết block bất thường TRONG một Chunk Cũ -> Đánh dấu Thảm Đỏ ngay
+                        if (blockScore > 0) {
+                            addSusScore(cx, cz, blockScore + 50); // Cộng dồn điểm thưởng cực lớn vì đây là Chunk Cũ
                         }
+                        
                     } catch (Exception ignored) {}
                 });
             }
@@ -263,6 +247,7 @@ public class SusChunkFinder extends Module {
         int currentScore = chunkSusScores.getOrDefault(key, 0) + amount;
         chunkSusScores.put(key, currentScore);
 
+        // Ngưỡng bùng nổ thảm đỏ dựa vào Sensitivity
         if (currentScore >= (11 - sensitivity.get()) * 15) {
             baseCache.put(key, new ChunkPos(cx, cz));
             chunkSusScores.remove(key); 
@@ -270,50 +255,31 @@ public class SusChunkFinder extends Module {
     }
 
     // ==========================================
-    // RENDER ĐỒ HỌA MẢNG RỘNG (KRYPTON STYLE)
+    // RENDER THẢM ĐỎ DUY NHẤT (SẠCH MÀN HÌNH)
     // ==========================================
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.world == null) return;
+        if (mc.world == null || baseCache.isEmpty()) return;
+
         pruneDistantChunks();
 
-        // 1. RENDER ĐƯỜNG MÒN CHUNK GIÀ (MÀU XANH LÁ)
-        if (trackOldChunks.get() && !oldChunkCache.isEmpty()) {
-            int aAge = ageAlpha.get();
-            Color ageSideColor = new Color(0, 255, 0, aAge);
-            Color ageLineColor = new Color(0, 255, 0, Math.min(255, aAge + 50));
-            double ageY = 61.9; // Nằm sát ngay dưới thảm đỏ để không bị đè màu
+        int aBase = alpha.get();
+        Color baseSideColor = new Color(255, 0, 0, aBase);
+        Color baseLineColor = new Color(255, 0, 0, 255); 
+        double baseY = 62.0; 
 
-            for (ChunkPos pos : oldChunkCache.values()) {
-                int bx = pos.getStartX();
-                int bz = pos.getStartZ();
-                event.renderer.box(
-                    bx,      ageY,       bz,
-                    bx + 16, ageY + 0.1, bz + 16,
-                    ageSideColor, ageLineColor,
-                    ShapeMode.Both, 0 
-                );
-            }
-        }
-
-        // 2. RENDER MỤC TIÊU BASE (MÀU ĐỎ RỰC)
-        if (!baseCache.isEmpty()) {
-            int aBase = alpha.get();
-            Color baseSideColor = new Color(255, 0, 0, aBase);
-            Color baseLineColor = new Color(255, 0, 0, 255); 
-            double baseY = 62.0; 
-
-            for (ChunkPos pos : baseCache.values()) {
-                int bx = pos.getStartX();
-                int bz = pos.getStartZ();
-                event.renderer.box(
-                    bx,      baseY,       bz,
-                    bx + 16, baseY + 0.1, bz + 16,
-                    baseSideColor, baseLineColor,
-                    ShapeMode.Both, 0 
-                );
-            }
+        for (ChunkPos pos : baseCache.values()) {
+            int bx = pos.getStartX();
+            int bz = pos.getStartZ();
+            
+            // Chỉ in Thảm Đỏ ở những khu vực khả nghi cao nhất
+            event.renderer.box(
+                bx,      baseY,       bz,
+                bx + 16, baseY + 0.1, bz + 16,
+                baseSideColor, baseLineColor,
+                ShapeMode.Both, 0 
+            );
         }
     }
 
@@ -324,7 +290,9 @@ public class SusChunkFinder extends Module {
         int dist = simulationDistance.get();
 
         baseCache.entrySet().removeIf(entry -> isTooFar(entry.getKey(), playerCx, playerCz, dist));
-        oldChunkCache.entrySet().removeIf(entry -> isTooFar(entry.getKey(), playerCx, playerCz, dist));
+        
+        // Dọn dẹp cache rác để tránh nặng RAM khi bay xa
+        newChunkCache.removeIf(key -> isTooFar(key, playerCx, playerCz, dist + 2));
     }
 
     private boolean isTooFar(long key, int playerCx, int playerCz, int dist) {
